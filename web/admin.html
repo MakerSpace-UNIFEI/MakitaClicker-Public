@@ -186,6 +186,69 @@
             background: #b71c1c;
             color: #fff;
         }
+        .admin-btn-real {
+            background: linear-gradient(135deg, #b71c1c, #d32f2f);
+            border: 1px solid #ff5252;
+            color: #ffffff;
+            padding: 0.8rem 1.4rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 800;
+            font-size: 0.95rem;
+            transition: all 0.2s;
+            box-shadow: 0 4px 12px rgba(211, 47, 47, 0.4);
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .admin-btn-real:hover {
+            background: linear-gradient(135deg, #c62828, #f44336);
+            box-shadow: 0 6px 16px rgba(244, 67, 54, 0.6);
+            transform: translateY(-1px);
+        }
+        .admin-btn-secondary-danger {
+            background: #2a1616;
+            border: 1px solid #7f2b2b;
+            color: #ffab91;
+            padding: 0.7rem 1.2rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.85rem;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .admin-btn-secondary-danger:hover {
+            background: #3e1f1f;
+            border-color: #d32f2f;
+            color: #ffffff;
+        }
+        .admin-queue-badge {
+            display: inline-block;
+            padding: 0.2rem 0.6rem;
+            border-radius: 999px;
+            font-size: 0.72rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .admin-badge-factory {
+            background: #b71c1c;
+            color: #fff;
+            border: 1px solid #ff5252;
+        }
+        .admin-badge-reset {
+            background: #e65100;
+            color: #fff;
+            border: 1px solid #ff9800;
+        }
+        .admin-badge-pending {
+            background: #2a1d00;
+            border: 1px solid #ff9800;
+            color: #ffb74d;
+        }
     </style>
 </head>
 <body>
@@ -260,13 +323,43 @@
                 </table>
             </div>
 
-            <!-- Seção de Reset de Hardware / Global -->
-            <div class="stat-card" style="border-color: #552222; margin-top: 2rem;">
-                <h3 style="margin-top: 0; color: #ff8a80; font-size: 1.1rem;">Controle Global de Hardware (ESP8266)</h3>
-                <p style="font-size: 0.85rem; color: var(--text-lo); margin-bottom: 1.2rem;">
-                    O botão abaixo reinicia o estado mestre global da partida (`gamestate`) e emite a ordem de reset para a memória física do microcontrolador ESP8266.
+            <!-- Seção de Reset de Hardware / Fila de Ordens Latentes -->
+            <div class="stat-card" style="border-color: #772222; margin-top: 2.5rem; padding: 1.6rem; background: rgba(30, 10, 10, 0.4);">
+                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.8rem; margin-bottom: 0.8rem;">
+                    <h3 style="margin: 0; color: #ff8a80; font-size: 1.2rem; display: flex; align-items: center; gap: 0.5rem;">
+                        <span>⚙️</span> Controle de Hardware & Fila de Ordens (ESP8266)
+                    </h3>
+                    <div id="adminOrdersCountBadge" style="font-family: var(--mono); font-size: 0.85rem; color: #ffb74d; background: rgba(255, 152, 0, 0.15); border: 1px solid rgba(255, 152, 0, 0.3); padding: 0.3rem 0.8rem; border-radius: 20px;">
+                        Fila: 0 pendentes
+                    </div>
+                </div>
+
+                <p style="font-size: 0.88rem; color: var(--text-lo); line-height: 1.5; margin-bottom: 1.4rem;">
+                    Ordens de hardware são enfileiradas de forma <strong>latente</strong> (FIFO). Quando o ESP8266 se comunica com a nuvem, ele retira a ordem mais antiga, executa a ação e envia um <strong>ACK de confirmação</strong> para removê-la da fila, evitando repetições ou sobrescritas.
                 </p>
-                <button id="btnAdminResetGlobal" class="admin-danger-btn">⚠️ Emitir Ordem de Reset Global para ESP8266</button>
+
+                <div style="display: flex; gap: 1rem; flex-wrap: wrap; align-items: center; margin-bottom: 1.8rem;">
+                    <button id="btnAdminResetReal" class="admin-btn-real">
+                        <span>⚡</span> Reset Real da ESP8266 (Zerar Memória + Regravar Firmware via OTA)
+                    </button>
+                    <button id="btnAdminResetGlobal" class="admin-btn-secondary-danger">
+                        🔄 Reset Simples de Jogo (Apenas Variáveis & Saldo)
+                    </button>
+                </div>
+
+                <!-- Lista Visual da Fila de Ordens Latentes -->
+                <div style="border-top: 1px solid #441818; padding-top: 1.2rem;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.8rem;">
+                        <h4 style="margin: 0; font-size: 0.95rem; color: var(--text-hi);">Fila de Ordens Pendentes para a ESP8266</h4>
+                        <span style="font-size: 0.75rem; color: var(--text-faint);">Execução sequencial com confirmação de ACK</span>
+                    </div>
+                    <div id="adminOrdersQueueContainer" style="background: #111417; border: 1px solid #331515; border-radius: 6px; padding: 0.8rem;">
+                        <div id="adminOrdersQueueEmpty" style="color: var(--text-lo); font-size: 0.85rem; text-align: center; padding: 1.2rem;">
+                            Nenhuma ordem pendente. O hardware físico está 100% sincronizado.
+                        </div>
+                        <div id="adminOrdersQueueList" style="display: flex; flex-direction: column; gap: 0.6rem;"></div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>

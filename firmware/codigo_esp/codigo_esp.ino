@@ -90,6 +90,12 @@ String hardwareOwnerName = "";
 unsigned long hardwareOwnerExpiresAtMillis = 0;
 String currentTargetUserId = "";
 
+// Protótipos de funções de rede, ACK e OTA
+bool enviarAckOrdem(const char* orderId);
+void executarAtualizacaoFirmware(const char* fwUrl, const char* fwMd5, const char* titulo, const char* subtitulo);
+void forcarRegravacaoOTA();
+void checkOTA();
+
 const UpgradeConfig UPGRADE_CONFIGS[NUM_UPGRADES] = {
   { "upgrade1",          10.0,         1.10, 0.1 },        // +0.1 MPS
   { "upgrade_1mps",      100.0,        1.12, 1.0 },        // +1.0 MPS
@@ -556,64 +562,98 @@ void syncWithCloud() {
     DeserializationError err = deserializeJson(doc, responsePayload);
 
     if (!err) {
-      // 0. TRATAMENTO DA ORDEM DE RESET LATENTE VINDA DA NUVEM:
+      // 0. TRATAMENTO DA FILA DE ORDENS LATENTES VINDA DA NUVEM:
       bool resetOrder = doc["resetOrder"] | false;
-
-      if (resetOrder) {
-        Serial.println(F("[RESET] Ordem de reset latente recebida do servidor!"));
-        statusAtual = "Apagando...";
-        precisaAtualizarLCD = true;
-        atualizarLCD();
-
-        // Limpa todas as variáveis locais do jogo
-        makitas = 0.0;
-        pendingPhysicalClicks = 0;
-        for (int i = 0; i < NUM_UPGRADES; i++) {
-          ownedUpgrades[i] = 0;
-        }
-        permLubrificante = false;
-        permDiscoDiamante = false;
-        permMotorBrushless = false;
-        permEmpunhadura = false;
-        permBateriaLitio = false;
-        permIaMaker = false;
-        permRefrigeracao = false;
-        permTitanio = false;
-        permOverclock = false;
-        permNanobots = false;
-        permSingularidade = false;
-        permPlasmaCutter = false;
-        permFusaoFria = false;
-        permHiperconducao = false;
-        permSinergiaQuantica = false;
-        permLaserGama = false;
-        permTaquions = false;
-        permMateriaEscura = false;
-        permHiperClique = false;
-        permOnipotenciaMaker = false;
-
-        recalculateStats();
-        saveLocalGameState();
-        isFlashDirty = false;
-
-        // Marca ACK pendente e notifica no LCD
-        hasPendingResetAck = true;
-        statusAtual = "Reset OK!";
-        precisaAtualizarLCD = true;
-        atualizarLCD();
-
-        http.end();
-        client.stop();
-
-        // ZERO RECURSÃO: Agenda sincronização imediata no próximo loop
-        forceCloudSync = true;
-        return;
+      JsonObject orderObj;
+      bool hasOrderObj = false;
+      if (doc["pendingOrder"].is<JsonObject>()) {
+        orderObj = doc["pendingOrder"].as<JsonObject>();
+        hasOrderObj = true;
       }
 
-      // Se a ordem de reset já foi desativada no servidor, o ACK foi recebido com sucesso!
-      if (!resetOrder && hasPendingResetAck) {
-        hasPendingResetAck = false;
-        Serial.println(F("[RESET] Confirmacao de reset (ACK) validada pela nuvem!"));
+      if (resetOrder || hasOrderObj) {
+        const char* orderId = hasOrderObj ? (orderObj["id"] | "") : "legacy";
+        const char* orderType = hasOrderObj ? (orderObj["type"] | "reset") : "reset";
+        Serial.printf("[ORDEM] Ordem latente recebida da nuvem! ID=%s | Tipo=%s\n", orderId, orderType);
+
+        if (strcmp(orderType, "factory_reset") == 0) {
+          // -------------------------------------------------------------
+          // RESET REAL: ZERA MEMÓRIA FLASH E REGRAVA FIRMWARE VIA OTA
+          // -------------------------------------------------------------
+          Serial.println(F("[RESET_REAL] Executando Reset Real: Limpeza da Flash LittleFS e Regravacao OTA..."));
+          statusAtual = "Reset Real";
+          precisaAtualizarLCD = true;
+          atualizarLCD();
+
+          if (lcd) {
+            lcd->clear();
+            for (int i = 0; i < 4; i++) prevLcdLines[i][0] = '\0';
+            printLinhaFormatada(0, "====================");
+            printLinhaFormatada(1, "   RESET REAL ESP   ");
+            printLinhaFormatada(2, "Limpando Flash FS...");
+            printLinhaFormatada(3, "Enviando ACK...     ");
+          }
+
+          // 1. Zera todas as variáveis em RAM
+          makitas = 0.0;
+          pendingPhysicalClicks = 0;
+          for (int i = 0; i < NUM_UPGRADES; i++) ownedUpgrades[i] = 0;
+          permLubrificante = permDiscoDiamante = permMotorBrushless = permEmpunhadura = false;
+          permBateriaLitio = permIaMaker = permRefrigeracao = permTitanio = false;
+          permOverclock = permNanobots = permSingularidade = permPlasmaCutter = false;
+          permFusaoFria = permHiperconducao = permSinergiaQuantica = permLaserGama = false;
+          permTaquions = permMateriaEscura = permHiperClique = permOnipotenciaMaker = false;
+          recalculateStats();
+
+          // 2. Apaga arquivos locais e formata partição flash LittleFS
+          LittleFS.remove(GAMESTATE_FILE);
+          LittleFS.format();
+          isFlashDirty = false;
+
+          // 3. Encerra conexões ativas
+          http.end();
+          client.stop();
+
+          // 4. Envia confirmação de ACK para retirar da fila no servidor antes de regravar
+          enviarAckOrdem(orderId);
+
+          // 5. Força download e regravação completa do firmware via OTA com reboot automático
+          forcarRegravacaoOTA();
+          return;
+        } else {
+          // -------------------------------------------------------------
+          // RESET SIMPLES DE JOGO: LIMPA VARIÁVEIS E SALVA ESTADO ZERADO
+          // -------------------------------------------------------------
+          Serial.println(F("[RESET] Executando reset simples de variaveis..."));
+          statusAtual = "Apagando...";
+          precisaAtualizarLCD = true;
+          atualizarLCD();
+
+          makitas = 0.0;
+          pendingPhysicalClicks = 0;
+          for (int i = 0; i < NUM_UPGRADES; i++) ownedUpgrades[i] = 0;
+          permLubrificante = permDiscoDiamante = permMotorBrushless = permEmpunhadura = false;
+          permBateriaLitio = permIaMaker = permRefrigeracao = permTitanio = false;
+          permOverclock = permNanobots = permSingularidade = permPlasmaCutter = false;
+          permFusaoFria = permHiperconducao = permSinergiaQuantica = permLaserGama = false;
+          permTaquions = permMateriaEscura = permHiperClique = permOnipotenciaMaker = false;
+          recalculateStats();
+          saveLocalGameState();
+          isFlashDirty = false;
+
+          http.end();
+          client.stop();
+
+          // Envia confirmação (ACK) para a nuvem
+          enviarAckOrdem(orderId);
+
+          statusAtual = "Reset OK!";
+          precisaAtualizarLCD = true;
+          atualizarLCD();
+
+          forceCloudSync = true;
+          return;
+        }
       }
 
       // Desconta cliques confirmados
@@ -790,6 +830,165 @@ void syncWithCloud() {
   client.stop();
 }
 
+bool enviarAckOrdem(const char* orderId) {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  Serial.printf("[ORDEM] Enviando ACK para nuvem (orderId: %s)...\n", orderId);
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setBufferSizes(1024, 512);
+
+  HTTPClient http;
+  http.setTimeout(4000);
+  http.begin(client, API_URL);
+  http.addHeader("Content-Type", "application/json");
+
+#if ARDUINOJSON_VERSION_MAJOR >= 7
+  JsonDocument doc;
+#else
+  DynamicJsonDocument doc(256);
+#endif
+  doc["auth"] = API_AUTH;
+  doc["isEsp"] = true;
+  doc["ackOrderId"] = orderId;
+  doc["resetAck"] = true;
+
+  String body;
+  serializeJson(doc, body);
+  int httpCode = http.POST(body);
+  bool ok = (httpCode == HTTP_CODE_OK || httpCode == 201);
+  Serial.printf("[ORDEM] ACK HTTP code: %d (sucesso=%d)\n", httpCode, ok);
+
+  http.end();
+  client.stop();
+  return ok;
+}
+
+void executarAtualizacaoFirmware(const char* fwUrl, const char* fwMd5, const char* titulo, const char* subtitulo) {
+  if (strlen(fwUrl) == 0) return;
+
+  // 1. Salva estado pendente (se houver) e desmonta o LittleFS para proteger setores da flash
+  if (isFlashDirty) {
+    saveLocalGameState();
+    isFlashDirty = false;
+  }
+  LittleFS.end();
+
+  // 2. Feedback visual no LCD
+  if (lcd) {
+    lcd->clear();
+    for (int i = 0; i < 4; i++) prevLcdLines[i][0] = '\0';
+    printLinhaFormatada(0, "====================");
+    printLinhaFormatada(1, titulo);
+    printLinhaFormatada(2, subtitulo);
+    printLinhaFormatada(3, ">> GRAVANDO:  0% <<");
+  }
+
+  Serial.println(F("[OTA] Conectando para download e gravacao do binario..."));
+
+  // 3. Cliente TLS dedicado com buffer completo
+  WiFiClientSecure otaClient;
+  otaClient.setInsecure();
+
+  // 4. Configuração de atualização com reboot automático
+  ESPhttpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  ESPhttpUpdate.rebootOnUpdate(true);
+
+  if (strlen(fwMd5) > 0) {
+    Serial.printf("[OTA] Checksum MD5 esperado: %s\n", fwMd5);
+    ESPhttpUpdate.setMD5sum(fwMd5);
+  }
+
+  // 5. Hook de progresso no LCD
+  ESPhttpUpdate.onProgress([](int cur, int total) {
+    if (total > 0 && lcd) {
+      int pct = (cur * 100) / total;
+      static int lastPct = -1;
+      if (pct != lastPct) {
+        lastPct = pct;
+        char progBuf[21];
+        snprintf(progBuf, sizeof(progBuf), ">> GRAVANDO: %2d%% <<", pct);
+        printLinhaFormatada(3, progBuf);
+      }
+    }
+    yield();
+  });
+
+  // 6. Executa gravação na flash e reboot automático
+  t_httpUpdate_return ret = ESPhttpUpdate.update(otaClient, fwUrl);
+
+  // Se chegou nesta linha, o update falhou
+  Serial.printf("[OTA] Falha no FW update (%d): %s\n", ret, ESPhttpUpdate.getLastErrorString().c_str());
+
+  LittleFS.begin();
+  if (lcd) {
+    printLinhaFormatada(1, "  FALHA NO OTA!     ");
+    printLinhaFormatada(3, "Tentando depois...  ");
+    delay(2500);
+    for (int i = 0; i < 4; i++) prevLcdLines[i][0] = '\0';
+  }
+}
+
+void forcarRegravacaoOTA() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println(F("[RESET_REAL] Sem conexao WiFi para regravacao. Reiniciando..."));
+    ESP.restart();
+    return;
+  }
+
+  Serial.println(F("[RESET_REAL] Consultando version.json para forcar regravacao completa..."));
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setBufferSizes(2048, 512);
+
+  HTTPClient http;
+  http.setTimeout(4000);
+  String checkUrl = String(VERSION_URL) + "?t=" + String(millis());
+  http.begin(client, checkUrl);
+  http.addHeader("Cache-Control", "no-cache");
+  int httpCode = http.GET();
+
+  if (httpCode != HTTP_CODE_OK) {
+    Serial.printf("[RESET_REAL] Falha ao obter version.json: %d. Reiniciando...\n", httpCode);
+    http.end();
+    client.stop();
+    delay(1000);
+    ESP.restart();
+    return;
+  }
+
+  String payload = http.getString();
+  http.end();
+  client.stop();
+
+#if ARDUINOJSON_VERSION_MAJOR >= 7
+  JsonDocument doc;
+#else
+  DynamicJsonDocument doc(512);
+#endif
+  DeserializationError err = deserializeJson(doc, payload);
+  if (err) {
+    Serial.println(F("[RESET_REAL] Erro JSON version. Reiniciando..."));
+    delay(1000);
+    ESP.restart();
+    return;
+  }
+
+  const char* fwUrl = doc["firmware_url"] | "";
+  const char* fwMd5 = doc["firmware_md5"] | "";
+
+  if (strlen(fwUrl) > 0) {
+    Serial.printf("[RESET_REAL] Regravando firmware a partir de: %s\n", fwUrl);
+    executarAtualizacaoFirmware(fwUrl, fwMd5, "   RESET REAL ESP   ", "Regravando Flash...");
+  } else {
+    Serial.println(F("[RESET_REAL] URL de firmware vazia. Reiniciando..."));
+  }
+
+  // Se não reiniciou pelo OTA, reinicia manualmente
+  delay(1000);
+  ESP.restart();
+}
+
 void checkOTA() {
   if (WiFi.status() != WL_CONNECTED) return;
 
@@ -814,7 +1013,7 @@ void checkOTA() {
 
   String payload = http.getString();
   http.end();
-  client.stop(); // Libera socket e memória antes do parse e download pesado
+  client.stop();
 
 #if ARDUINOJSON_VERSION_MAJOR >= 7
   JsonDocument doc;
@@ -834,70 +1033,9 @@ void checkOTA() {
   Serial.printf("[OTA] Local FW=%d | Remoto FW=%d\n", CURRENT_FIRMWARE_VER, remoteVersion);
 
   if (remoteVersion > CURRENT_FIRMWARE_VER && strlen(fwUrl) > 0) {
-    // 1. Salva estado pendente e desmonta o LittleFS para proteger setores da flash
-    if (isFlashDirty) {
-      saveLocalGameState();
-      isFlashDirty = false;
-    }
-    LittleFS.end();
-
-    // 2. Feedback visual inicial no LCD
-    if (lcd) {
-      lcd->clear();
-      for (int i = 0; i < 4; i++) prevLcdLines[i][0] = '\0';
-      printLinhaFormatada(0, "====================");
-      printLinhaFormatada(1, "  ATUALIZANDO OTA   ");
-      char vBuf[21];
-      snprintf(vBuf, sizeof(vBuf), " v%d -> v%d", CURRENT_FIRMWARE_VER, remoteVersion);
-      printLinhaFormatada(2, vBuf);
-      printLinhaFormatada(3, ">> GRAVANDO:  0% <<");
-    }
-
-    Serial.println(F("[OTA] Conectando para download do binario..."));
-
-    // 3. Cliente TLS dedicado com buffer completo para suportar records de 16KB da Cloudflare
-    WiFiClientSecure otaClient;
-    otaClient.setInsecure();
-
-    // 4. Configuração de segurança e tolerância a redirecionamentos
-    ESPhttpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    ESPhttpUpdate.rebootOnUpdate(true);
-
-    if (strlen(fwMd5) > 0) {
-      Serial.printf("[OTA] Checksum MD5 esperado: %s\n", fwMd5);
-      ESPhttpUpdate.setMD5sum(fwMd5);
-    }
-
-    // 5. Hook de progresso com atualização no LCD
-    ESPhttpUpdate.onProgress([](int cur, int total) {
-      if (total > 0 && lcd) {
-        int pct = (cur * 100) / total;
-        static int lastPct = -1;
-        if (pct != lastPct) {
-          lastPct = pct;
-          char progBuf[21];
-          snprintf(progBuf, sizeof(progBuf), ">> GRAVANDO: %2d%% <<", pct);
-          printLinhaFormatada(3, progBuf);
-        }
-      }
-      yield();
-    });
-
-    // 6. Executa a gravação na flash e reboot automático
-    t_httpUpdate_return ret = ESPhttpUpdate.update(otaClient, fwUrl);
-
-    // Se chegou aqui, houve falha no update (rebootOnUpdate=true reinicia automaticamente se OK)
-    Serial.printf("[OTA] Falha no FW update (%d): %s\n", ret, ESPhttpUpdate.getLastErrorString().c_str());
-
-    // Remonta o sistema de arquivos após falha
-    LittleFS.begin();
-
-    if (lcd) {
-      printLinhaFormatada(1, "  FALHA NO OTA!     ");
-      printLinhaFormatada(3, "Tentando depois...  ");
-      delay(2500);
-      for (int i = 0; i < 4; i++) prevLcdLines[i][0] = '\0';
-    }
+    char vBuf[21];
+    snprintf(vBuf, sizeof(vBuf), " v%d -> v%d", CURRENT_FIRMWARE_VER, remoteVersion);
+    executarAtualizacaoFirmware(fwUrl, fwMd5, "  ATUALIZANDO OTA   ", vBuf);
   }
 }
 

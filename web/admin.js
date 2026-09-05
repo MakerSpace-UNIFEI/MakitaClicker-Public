@@ -22,7 +22,13 @@ const usersTableBodyEl = document.getElementById('adminUsersTableBody');
 
 const btnRefreshEl = document.getElementById('btnAdminRefresh');
 const btnDeleteAllEl = document.getElementById('btnAdminDeleteAll');
+const btnResetRealEl = document.getElementById('btnAdminResetReal');
 const btnResetGlobalEl = document.getElementById('btnAdminResetGlobal');
+
+const ordersCountBadgeEl = document.getElementById('adminOrdersCountBadge');
+const ordersQueueEmptyEl = document.getElementById('adminOrdersQueueEmpty');
+const ordersQueueListEl = document.getElementById('adminOrdersQueueList');
+let cachedOrders = [];
 
 // Função criptográfica SHA-256 nativa do navegador
 async function hashPassword(str) {
@@ -44,7 +50,7 @@ function formatCompact(num) {
 function formatDate(ts) {
     if (!ts) return '—';
     const d = new Date(ts);
-    return d.toLocaleDateString('pt-BR') + ' ' + d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    return d.toLocaleDateString('pt-BR') + ' ' + d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
 async function verifyAndLoad(hash) {
@@ -75,10 +81,10 @@ function showDashboard(data) {
     if (loginViewEl) loginViewEl.style.display = 'none';
     if (dashboardViewEl) dashboardViewEl.style.display = 'block';
 
-    updateDashboardData(data.users || [], data.topPlayer, data._kv_binding);
+    updateDashboardData(data.users || [], data.topPlayer, data._kv_binding, data.hardwareOrders || []);
 }
 
-function updateDashboardData(users, topPlayer, kvBinding) {
+function updateDashboardData(users, topPlayer, kvBinding, hardwareOrders = []) {
     if (totalUsersEl) totalUsersEl.textContent = users.length;
     if (topPlayerEl) {
         topPlayerEl.textContent = topPlayer ? `${topPlayer.name} (${formatCompact(topPlayer.totalMakitasMade || topPlayer.makitas)})` : 'Nenhum';
@@ -89,6 +95,7 @@ function updateDashboardData(users, topPlayer, kvBinding) {
     }
 
     renderTable(users);
+    renderOrdersQueue(hardwareOrders);
 }
 
 function renderTable(users) {
@@ -155,7 +162,7 @@ async function refreshList() {
         });
         const data = await res.json();
         if (data.success) {
-            updateDashboardData(data.users || [], data.topPlayer, data._kv_binding);
+            updateDashboardData(data.users || [], data.topPlayer, data._kv_binding, data.hardwareOrders || []);
         }
     } catch (e) {
         alert('Erro ao atualizar dados: ' + e.message);
@@ -231,32 +238,147 @@ async function deleteAllUsers() {
     }
 }
 
-async function resetGlobalHardware() {
-    if (!confirm('Deseja emitir ordem de reset global para o hardware ESP8266?\nO saldo mestre físico será zerado na próxima sincronização.')) {
+function renderOrdersQueue(orders = []) {
+    cachedOrders = Array.isArray(orders) ? orders : [];
+    if (ordersCountBadgeEl) {
+        ordersCountBadgeEl.textContent = `Fila: ${cachedOrders.length} pendente(s)`;
+    }
+
+    if (!ordersQueueListEl || !ordersQueueEmptyEl) return;
+
+    if (cachedOrders.length === 0) {
+        ordersQueueEmptyEl.style.display = 'block';
+        ordersQueueListEl.innerHTML = '';
         return;
     }
 
-    if (btnResetGlobalEl) {
-        btnResetGlobalEl.disabled = true;
-        btnResetGlobalEl.textContent = '⏳ Emitindo ordem...';
+    ordersQueueEmptyEl.style.display = 'none';
+    ordersQueueListEl.innerHTML = '';
+
+    cachedOrders.forEach((order, idx) => {
+        const isFactory = order.type === 'factory_reset';
+        const badgeClass = isFactory ? 'admin-badge-factory' : 'admin-badge-reset';
+        const badgeText = isFactory ? '⚡ Reset Real (Flash + OTA)' : '🔄 Reset Simples';
+        const itemEl = document.createElement('div');
+        itemEl.style.display = 'flex';
+        itemEl.style.justifyContent = 'space-between';
+        itemEl.style.alignItems = 'center';
+        itemEl.style.background = '#181b1f';
+        itemEl.style.border = isFactory ? '1px solid #772222' : '1px solid #443322';
+        itemEl.style.borderRadius = '6px';
+        itemEl.style.padding = '0.8rem 1rem';
+        itemEl.style.gap = '1rem';
+        itemEl.style.flexWrap = 'wrap';
+
+        itemEl.innerHTML = `
+            <div style="display: flex; flex-direction: column; gap: 0.35rem; flex: 1;">
+                <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
+                    <span style="font-weight: 700; color: var(--text-lo); font-size: 0.8rem;">#${idx + 1}</span>
+                    <span class="admin-queue-badge ${badgeClass}">${badgeText}</span>
+                    <span style="font-family: var(--mono); font-size: 0.78rem; color: var(--text-lo);">ID: ${escapeHtml(order.id)}</span>
+                    <span class="admin-queue-badge admin-badge-pending">⏳ Aguardando ACK da ESP</span>
+                </div>
+                <div style="font-size: 0.88rem; color: var(--text-hi); font-weight: 600;">
+                    ${escapeHtml(order.description || (isFactory ? 'Reset Real: Formatação LittleFS e Regravação OTA' : 'Reset Simples'))}
+                </div>
+                <div style="font-size: 0.75rem; color: var(--text-faint);">
+                    Enfileirado em: ${formatDate(order.createdAt)}
+                </div>
+            </div>
+            <div>
+                <button class="admin-cancel-order-btn" data-id="${escapeHtml(order.id)}" style="background: #3a1616; border: 1px solid #882222; color: #ffab91; padding: 0.45rem 0.85rem; border-radius: 4px; cursor: pointer; font-size: 0.78rem; font-weight: 600; transition: all 0.2s;">
+                    ❌ Cancelar Ordem
+                </button>
+            </div>
+        `;
+        ordersQueueListEl.appendChild(itemEl);
+    });
+
+    // Listeners de cancelamento de ordens individuais
+    ordersQueueListEl.querySelectorAll('.admin-cancel-order-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const orderId = btn.dataset.id;
+            cancelHardwareOrder(orderId);
+        });
+    });
+}
+
+async function cancelHardwareOrder(orderId) {
+    if (!confirm(`Deseja realmente cancelar a ordem de hardware "${orderId}" da fila?\nEla será descartada e não será executada pela ESP8266.`)) {
+        return;
     }
 
     try {
         const res = await fetch('/api/state', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'admin_reset_hardware', authHash: currentAuthHash })
+            body: JSON.stringify({
+                action: 'admin_cancel_order',
+                authHash: currentAuthHash,
+                orderId
+            })
         });
         const data = await res.json();
-        if (data.isReset || data.success) {
-            alert('Ordem de reset latente emitida com sucesso! A ESP8266 física apagará sua memória e responderá com ACK.');
+        if (data.success) {
+            renderOrdersQueue(data.hardwareOrders || []);
+        } else {
+            alert('Falha ao cancelar ordem: ' + (data.error || 'Erro desconhecido'));
         }
     } catch (e) {
-        alert('Erro ao emitir ordem: ' + e.message);
+        alert('Erro ao cancelar ordem: ' + e.message);
+    }
+}
+
+async function emitHardwareOrder(orderType) {
+    const isFactory = orderType === 'factory_reset';
+    let confirmMsg = '';
+    if (isFactory) {
+        confirmMsg = '⚠️ ATENÇÃO: RESET REAL DA ESP8266!\n\n' +
+                     'Esta ação enfileirará uma ordem para:\n' +
+                     '1. Formatar a memória flash física (LittleFS) do microcontrolador.\n' +
+                     '2. Zerar todas as variáveis de jogo e cliques em RAM.\n' +
+                     '3. Forçar o download e regravação completa do firmware via OTA com reinicialização física.\n' +
+                     '4. A ordem permanecerá na fila latente até que a ESP envie o ACK de confirmação.\n\n' +
+                     'Deseja realmente emitir a ordem de Reset Real?';
+    } else {
+        confirmMsg = 'Deseja emitir uma ordem de Reset Simples para a ESP8266?\n' +
+                     'O saldo e as variáveis de jogo serão zerados na próxima sincronização.';
+    }
+
+    if (!confirm(confirmMsg)) return;
+
+    const targetBtn = isFactory ? btnResetRealEl : btnResetGlobalEl;
+    const originalHtml = targetBtn ? targetBtn.innerHTML : '';
+    if (targetBtn) {
+        targetBtn.disabled = true;
+        targetBtn.textContent = '⏳ Emitindo ordem...';
+    }
+
+    try {
+        const res = await fetch('/api/state', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                action: 'admin_reset_hardware',
+                orderType,
+                authHash: currentAuthHash
+            })
+        });
+        const data = await res.json();
+        if (data.success || data.isReset) {
+            renderOrdersQueue(data.hardwareOrders || []);
+            alert(isFactory
+                ? '⚡ Ordem de Reset Real enfileirada com sucesso!\nO comando permanecerá na fila até a ESP física conectar, limpar a flash, regravar o firmware e emitir o ACK.'
+                : '🔄 Ordem de Reset Simples enfileirada com sucesso!');
+        } else {
+            alert('Falha ao emitir ordem: ' + (data.error || 'Erro desconhecido'));
+        }
+    } catch (e) {
+        alert('Erro na requisição: ' + e.message);
     } finally {
-        if (btnResetGlobalEl) {
-            btnResetGlobalEl.disabled = false;
-            btnResetGlobalEl.textContent = '⚠️ Emitir Ordem de Reset Global para ESP8266';
+        if (targetBtn) {
+            targetBtn.disabled = false;
+            targetBtn.innerHTML = originalHtml;
         }
     }
 }
@@ -281,7 +403,26 @@ if (loginFormEl) {
 
 if (btnRefreshEl) btnRefreshEl.addEventListener('click', refreshList);
 if (btnDeleteAllEl) btnDeleteAllEl.addEventListener('click', deleteAllUsers);
-if (btnResetGlobalEl) btnResetGlobalEl.addEventListener('click', resetGlobalHardware);
+if (btnResetRealEl) btnResetRealEl.addEventListener('click', () => emitHardwareOrder('factory_reset'));
+if (btnResetGlobalEl) btnResetGlobalEl.addEventListener('click', () => emitHardwareOrder('reset'));
+
+// Auto-atualização periódica da fila de ordens a cada 5 segundos enquanto autenticado no dashboard
+setInterval(() => {
+    if (currentAuthHash && dashboardViewEl && dashboardViewEl.style.display !== 'none') {
+        fetch('/api/state', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'admin_verify', authHash: currentAuthHash })
+        })
+        .then(r => r.json())
+        .then(data => {
+            if (data.success && Array.isArray(data.hardwareOrders)) {
+                renderOrdersQueue(data.hardwareOrders);
+            }
+        })
+        .catch(() => {});
+    }
+}, 5000);
 
 // Auto-login se houver sessão ativa
 if (currentAuthHash) {

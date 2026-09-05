@@ -94,6 +94,7 @@ function getDefaultState() {
     perms,
     resetId: 0,
     resetPendingEsp: false,
+    hardwareOrders: [], // Fila latente FIFO de ordens para o hardware ESP8266
     lastResetAckAt: 0,
     espTelemetry: null,
     lastUpdate: Date.now()
@@ -519,11 +520,16 @@ export async function onRequestGet(context) {
   const now = Date.now();
   advancePassiveProduction(state, now);
 
+  const activeOrder = (state.hardwareOrders && state.hardwareOrders.length > 0) ? state.hardwareOrders[0] : null;
+
   return new Response(JSON.stringify({
     ...state,
     topPlayer,
     hardwareOwner,
-    resetOrder: state.resetPendingEsp === true,
+    resetOrder: (state.hardwareOrders && state.hardwareOrders.length > 0) || state.resetPendingEsp === true,
+    pendingOrder: activeOrder,
+    hardwareOrders: state.hardwareOrders || [],
+    queueLength: (state.hardwareOrders ? state.hardwareOrders.length : 0),
     _kv_connected: kvConnected,
     _kv_binding: kvName || 'NONE',
     _kv_diag: diag
@@ -822,11 +828,14 @@ export async function onRequestPost(context) {
         headers: CORS_HEADERS
       });
     }
+    const { state: curState } = await loadState(env);
     return new Response(JSON.stringify({
       success: true,
       users: usersList,
       topPlayer,
       hardwareOwner,
+      hardwareOrders: curState.hardwareOrders || [],
+      queueLength: (curState.hardwareOrders ? curState.hardwareOrders.length : 0),
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE',
       _kv_diag: diag
@@ -901,6 +910,7 @@ export async function onRequestPost(context) {
     });
   }
 
+  // AÇÃO ADMINISTRATIVA: EMITIR ORDEM NA FILA DA ESP (Factory Reset / Reset Simples)
   if (action === 'admin_reset_hardware') {
     const authHash = String(body.authHash || '').trim().toLowerCase();
     if (authHash !== ADMIN_AUTH_HASH) {
@@ -910,24 +920,103 @@ export async function onRequestPost(context) {
       });
     }
 
-    const resetId = Date.now();
-    const newState = getDefaultState();
-    newState.resetId = resetId;
-    newState.resetPendingEsp = true; // Flag latente: persiste até confirmação da ESP via ACK
-    newState.lastUpdate = resetId;
-    newState.lastKvSave = resetId;
-    await saveState(env, newState);
+    const { state: curState } = await loadState(env);
+    curState.hardwareOrders = Array.isArray(curState.hardwareOrders) ? curState.hardwareOrders : [];
+
+    const orderId = 'ord_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+    const orderType = body.orderType || 'factory_reset'; // 'factory_reset' (Reset Real: limpa LittleFS + regrava firmware via OTA) ou 'reset' (limpa jogo)
+
+    const order = {
+      id: orderId,
+      type: orderType,
+      target: 'esp',
+      createdAt: Date.now(),
+      description: orderType === 'factory_reset'
+        ? 'Reset Real: Limpeza da Flash LittleFS e Regravação de Firmware via OTA'
+        : 'Reset Simples de Jogo: Limpeza de variáveis e saldo'
+    };
+
+    curState.hardwareOrders.push(order);
+    curState.resetPendingEsp = true;
+    curState.lastUpdate = Date.now();
+    curState.lastKvSave = Date.now();
+    await saveState(env, curState);
 
     return new Response(JSON.stringify({
       success: true,
-      ...newState,
+      order,
+      queueLength: curState.hardwareOrders.length,
+      hardwareOrders: curState.hardwareOrders,
+      pendingOrder: curState.hardwareOrders[0],
       topPlayer,
       hardwareOwner,
-      isReset: true,
       resetOrder: true,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE',
       _kv_diag: diag
+    }), {
+      status: 200,
+      headers: CORS_HEADERS
+    });
+  }
+
+  // AÇÃO ADMINISTRATIVA: CANCELAR ORDEM PENDENTE NA FILA
+  if (action === 'admin_cancel_order') {
+    const authHash = String(body.authHash || '').trim().toLowerCase();
+    if (authHash !== ADMIN_AUTH_HASH) {
+      return new Response(JSON.stringify({ success: false, error: 'Não autorizado.' }), {
+        status: 401,
+        headers: CORS_HEADERS
+      });
+    }
+    const orderId = body.orderId;
+    const { state: curState } = await loadState(env);
+    curState.hardwareOrders = (curState.hardwareOrders || []).filter(o => o.id !== orderId);
+    if (curState.hardwareOrders.length === 0) {
+      curState.resetPendingEsp = false;
+    }
+    await saveState(env, curState);
+    return new Response(JSON.stringify({
+      success: true,
+      cancelledOrderId: orderId,
+      hardwareOrders: curState.hardwareOrders,
+      queueLength: curState.hardwareOrders.length,
+      _kv_connected: kvConnected
+    }), {
+      status: 200,
+      headers: CORS_HEADERS
+    });
+  }
+
+  // AÇÃO DE CONFIRMAÇÃO (ACK) DIRETA DE ORDEM PELA ESP8266
+  if (action === 'ack_order') {
+    const { state: curState } = await loadState(env);
+    curState.hardwareOrders = Array.isArray(curState.hardwareOrders) ? curState.hardwareOrders : [];
+    const ackOrderId = body.ackOrderId;
+    let dequeued = null;
+
+    if (ackOrderId) {
+      const idx = curState.hardwareOrders.findIndex(o => o.id === ackOrderId);
+      if (idx >= 0) dequeued = curState.hardwareOrders.splice(idx, 1)[0];
+    } else if (curState.hardwareOrders.length > 0) {
+      dequeued = curState.hardwareOrders.shift();
+    }
+
+    if (curState.hardwareOrders.length === 0) {
+      curState.resetPendingEsp = false;
+    }
+    curState.lastResetAckAt = Date.now();
+    curState.lastUpdate = Date.now();
+    await saveState(env, curState);
+
+    return new Response(JSON.stringify({
+      success: true,
+      dequeued,
+      queueLength: curState.hardwareOrders.length,
+      hardwareOrders: curState.hardwareOrders,
+      nextOrder: curState.hardwareOrders[0] || null,
+      _kv_connected: kvConnected,
+      _kv_binding: kvName || 'NONE'
     }), {
       status: 200,
       headers: CORS_HEADERS
@@ -946,21 +1035,41 @@ export async function onRequestPost(context) {
   let clientTotal = typeof body.totalMakitasMade === 'number' ? body.totalMakitasMade : null;
   let clicks = Math.max(0, Math.min(parseInt(body.clicks || body.count || 0, 10), 5000));
 
-  // Reset total disparado pelo website: emite ordem latente para a ESP
+  // Reset total disparado pelo website: adiciona ordem de reset de jogo na fila da ESP
   if (action === 'reset') {
     const resetId = Date.now();
-    const newState = getDefaultState();
-    newState.resetId = resetId;
-    newState.resetPendingEsp = true; // Emite ordem contínua e latente para a ESP
-    newState.lastUpdate = resetId;
-    newState.lastKvSave = resetId;
-    await saveState(env, newState);
+    const orderId = 'ord_' + resetId + '_' + Math.random().toString(36).slice(2, 6);
+
+    state.hardwareOrders = Array.isArray(state.hardwareOrders) ? state.hardwareOrders : [];
+    const order = {
+      id: orderId,
+      type: 'reset',
+      target: 'esp',
+      createdAt: resetId,
+      description: 'Reset de Partida: Limpar saldo e upgrades'
+    };
+    state.hardwareOrders.push(order);
+
+    state.resetId = resetId;
+    state.resetPendingEsp = true;
+    state.makitas = 0.0;
+    state.totalMakitasMade = 0.0;
+    state.owned = {};
+    state.perms = {};
+    state.mps = 0.0;
+    state.clickPower = 1.0;
+    state.lastUpdate = resetId;
+    state.lastKvSave = resetId;
+    await saveState(env, state);
     return new Response(JSON.stringify({
-      ...newState,
+      ...state,
       topPlayer,
       hardwareOwner,
       isReset: true,
       resetOrder: true,
+      pendingOrder: state.hardwareOrders[0],
+      queueLength: state.hardwareOrders.length,
+      hardwareOrders: state.hardwareOrders,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE',
       _kv_diag: diag
@@ -974,31 +1083,55 @@ export async function onRequestPost(context) {
   // TRATAMENTO EXCLUSIVO DE SINCRONIZAÇÃO DA ESP8266
   // -------------------------------------------------------------
   if (isEsp) {
-    if (state.resetPendingEsp) {
-      if (body.resetAck === true) {
-        state.resetPendingEsp = false;
-        state.lastResetAckAt = now;
-        state.makitas = 0.0;
-        state.totalMakitasMade = 0.0;
-        state.owned = {};
-        state.perms = {};
-        state.mps = 0.0;
-        state.clickPower = 1.0;
-        await saveState(env, state);
-      } else {
-        await saveState(env, state);
-        return new Response(JSON.stringify({
-          resetOrder: true,
-          topPlayer,
-          hardwareOwner,
-          _kv_connected: kvConnected,
-          _kv_binding: kvName || 'NONE',
-          _kv_diag: diag
-        }), {
-          status: 200,
-          headers: CORS_HEADERS
-        });
+    state.hardwareOrders = Array.isArray(state.hardwareOrders) ? state.hardwareOrders : [];
+
+    // 1. Processamento de Confirmação (ACK) enviado pela ESP
+    const ackOrderId = body.ackOrderId;
+    if (ackOrderId || body.resetAck === true) {
+      if (ackOrderId) {
+        state.hardwareOrders = state.hardwareOrders.filter(o => o.id !== ackOrderId);
+      } else if (state.hardwareOrders.length > 0) {
+        state.hardwareOrders.shift();
       }
+      if (state.hardwareOrders.length === 0) {
+        state.resetPendingEsp = false;
+      }
+      state.lastResetAckAt = now;
+      state.makitas = 0.0;
+      state.totalMakitasMade = 0.0;
+      state.owned = {};
+      state.perms = {};
+      state.mps = 0.0;
+      state.clickPower = 1.0;
+      await saveState(env, state);
+    }
+
+    state.espTelemetry = {
+      lastPing: now,
+      fwVersion: typeof body.fwVersion === 'number' ? body.fwVersion : (state.espTelemetry?.fwVersion || 0),
+      ip: typeof body.ip === 'string' ? body.ip : (state.espTelemetry?.ip || 'desconhecido'),
+      rssi: typeof body.rssi === 'number' ? body.rssi : (state.espTelemetry?.rssi || null),
+      uptime: typeof body.uptime === 'number' ? body.uptime : (state.espTelemetry?.uptime || 0),
+      freeHeap: typeof body.freeHeap === 'number' ? body.freeHeap : (state.espTelemetry?.freeHeap || 0)
+    };
+
+    // 2. Se houver ordens latentes pendentes na fila, envia a mais antiga (FIFO) para a ESP
+    const activeOrder = state.hardwareOrders.length > 0 ? state.hardwareOrders[0] : null;
+    if (activeOrder) {
+      await saveState(env, state);
+      return new Response(JSON.stringify({
+        resetOrder: true,
+        pendingOrder: activeOrder,
+        queueLength: state.hardwareOrders.length,
+        topPlayer,
+        hardwareOwner,
+        _kv_connected: kvConnected,
+        _kv_binding: kvName || 'NONE',
+        _kv_diag: diag
+      }), {
+        status: 200,
+        headers: CORS_HEADERS
+      });
     }
 
     state.espTelemetry = {
