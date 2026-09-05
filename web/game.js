@@ -16,6 +16,7 @@ let hasUnsavedChanges = false;
 let totalClicks = 0;
 const sessionStartTime = Date.now();
 let latestTopPlayer = null;
+let latestHardwareOwner = null;
 
 // ---------- estado ----------
 let makitas = 0;
@@ -1060,6 +1061,10 @@ function applyServerState(data) {
     if (data.topPlayer) {
         latestTopPlayer = data.topPlayer;
     }
+    if (data.hardwareOwner) {
+        latestHardwareOwner = data.hardwareOwner;
+        updateHardwareUI();
+    }
 
     latestServerData = data;
     isDirty = true;
@@ -1292,6 +1297,194 @@ const btnSwitchProfileEl = document.getElementById('btnSwitchProfile');
 const btnSaveCloudEl = document.getElementById('btnSaveCloud');
 const saveStatusTextEl = document.getElementById('saveStatusText');
 
+// ---------- CONTROLE DE POSSE DO CONSOLE FÍSICO (ESP8266) ----------
+const btnClaimHardwareEl = document.getElementById('btnClaimHardware');
+const statHardwareOwnerEl = document.getElementById('statHardwareOwner');
+const statHardwareOwnerHintEl = document.getElementById('statHardwareOwnerHint');
+const hardwareBusyModalEl = document.getElementById('hardwareBusyModal');
+const hardwareBusyOwnerNameEl = document.getElementById('hardwareBusyOwnerName');
+const hardwareBusyRemainingTimeEl = document.getElementById('hardwareBusyRemainingTime');
+const btnCancelHardwareClaimEl = document.getElementById('btnCancelHardwareClaim');
+const btnConfirmHardwareTakeoverEl = document.getElementById('btnConfirmHardwareTakeover');
+
+function formatHardwareTime(sec) {
+    const s = Math.max(0, Math.floor(sec || 0));
+    const m = Math.floor(s / 60);
+    const rem = s % 60;
+    return `${String(m).padStart(2, '0')}:${String(rem).padStart(2, '0')}`;
+}
+
+function updateHardwareUI() {
+    if (statHardwareOwnerEl) {
+        if (latestHardwareOwner && latestHardwareOwner.active && latestHardwareOwner.remainingSec > 0) {
+            const isMe = (latestHardwareOwner.userId === currentUserId);
+            const remStr = formatHardwareTime(latestHardwareOwner.remainingSec);
+            statHardwareOwnerEl.textContent = `${latestHardwareOwner.userName} (${remStr})`;
+            statHardwareOwnerEl.style.color = isMe ? 'var(--green)' : 'var(--orange)';
+            if (statHardwareOwnerHintEl) {
+                statHardwareOwnerHintEl.textContent = isMe ? '⚡ Cliques físicos creditados ao seu perfil!' : 'Controlado por outro jogador';
+            }
+        } else {
+            statHardwareOwnerEl.textContent = 'Livre (1º Lugar)';
+            statHardwareOwnerEl.style.color = 'var(--teal)';
+            if (statHardwareOwnerHintEl) {
+                statHardwareOwnerHintEl.textContent = latestTopPlayer ? `Cliques vão para: ${latestTopPlayer.name}` : 'Cliques creditados ao Líder';
+            }
+        }
+    }
+
+    if (!btnClaimHardwareEl) return;
+
+    if (latestHardwareOwner && latestHardwareOwner.active && latestHardwareOwner.remainingSec > 0) {
+        const remStr = formatHardwareTime(latestHardwareOwner.remainingSec);
+        const isMe = (latestHardwareOwner.userId === currentUserId);
+
+        if (isMe) {
+            btnClaimHardwareEl.className = 'btn-hardware-claim is-owned';
+            btnClaimHardwareEl.textContent = `🎮 Console Vinculado (${remStr})`;
+            btnClaimHardwareEl.title = 'Você está no comando do hardware físico! Seus cliques físicos no ESP8266 vão para este perfil.';
+        } else {
+            btnClaimHardwareEl.className = 'btn-hardware-claim is-busy';
+            const shortName = (latestHardwareOwner.userName || 'Maker').slice(0, 10);
+            btnClaimHardwareEl.textContent = `🔒 ${shortName} (${remStr})`;
+            btnClaimHardwareEl.title = `Controlado por ${latestHardwareOwner.userName}. Clique para assumir o controle!`;
+        }
+    } else {
+        btnClaimHardwareEl.className = 'btn-hardware-claim';
+        btnClaimHardwareEl.textContent = '⚡ Assumir Console';
+        btnClaimHardwareEl.title = 'Assumir o console físico ESP8266 por 3 minutos para creditar cliques no seu perfil.';
+    }
+}
+
+// Contador regressivo local a cada segundo para fluidez visual da posse
+setInterval(() => {
+    if (latestHardwareOwner && latestHardwareOwner.active) {
+        if (latestHardwareOwner.remainingSec > 0) {
+            latestHardwareOwner.remainingSec--;
+            if (hardwareBusyModalEl && hardwareBusyModalEl.style.display !== 'none' && hardwareBusyRemainingTimeEl) {
+                hardwareBusyRemainingTimeEl.textContent = formatHardwareTime(latestHardwareOwner.remainingSec);
+            }
+        }
+        if (latestHardwareOwner.remainingSec <= 0) {
+            latestHardwareOwner.active = false;
+            if (hardwareBusyModalEl) hardwareBusyModalEl.style.display = 'none';
+        }
+        updateHardwareUI();
+    }
+}, 1000);
+
+async function claimHardware(force = false) {
+    if (!currentUserId) {
+        alert('Por favor, selecione ou crie um perfil antes de assumir o console físico!');
+        openProfileModal();
+        return;
+    }
+
+    if (btnClaimHardwareEl) {
+        btnClaimHardwareEl.disabled = true;
+    }
+
+    try {
+        const res = await fetch('/api/state', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                action: 'claim_hardware',
+                userId: currentUserId,
+                userName: currentUserName || 'Maker',
+                force
+            })
+        });
+
+        const data = await res.json();
+
+        if (res.status === 409 || (data && data.busy)) {
+            if (data.owner) {
+                latestHardwareOwner = {
+                    ...data.owner,
+                    active: true
+                };
+            }
+            openHardwareBusyModal(data.owner);
+            return;
+        }
+
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+
+        if (data.hardwareOwner) {
+            latestHardwareOwner = data.hardwareOwner;
+            updateHardwareUI();
+            closeHardwareBusyModal();
+            showFloatText('🎮 Console Físico Vinculado!');
+        }
+    } catch (e) {
+        console.warn('Erro ao reivindicar console:', e);
+        alert('Erro ao conectar ao console: ' + e.message);
+    } finally {
+        if (btnClaimHardwareEl) {
+            btnClaimHardwareEl.disabled = false;
+        }
+    }
+}
+
+async function releaseHardware() {
+    if (!currentUserId) return;
+    try {
+        const res = await fetch('/api/state', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                action: 'release_hardware',
+                userId: currentUserId
+            })
+        });
+        const data = await res.json();
+        if (data.hardwareOwner) {
+            latestHardwareOwner = data.hardwareOwner;
+            updateHardwareUI();
+            showFloatText('🔓 Console Liberado!');
+        }
+    } catch (e) {
+        console.warn('Erro ao liberar console:', e);
+    }
+}
+
+function openHardwareBusyModal(owner) {
+    if (!hardwareBusyModalEl) return;
+    const name = owner?.userName || latestHardwareOwner?.userName || 'Outro Maker';
+    const remSec = owner?.remainingSec || latestHardwareOwner?.remainingSec || 0;
+    if (hardwareBusyOwnerNameEl) hardwareBusyOwnerNameEl.textContent = name;
+    if (hardwareBusyRemainingTimeEl) hardwareBusyRemainingTimeEl.textContent = formatHardwareTime(remSec);
+    hardwareBusyModalEl.style.display = 'flex';
+}
+
+function closeHardwareBusyModal() {
+    if (hardwareBusyModalEl) hardwareBusyModalEl.style.display = 'none';
+}
+
+function handleHardwareClaimClick() {
+    if (!currentUserId) {
+        alert('Por favor, selecione ou crie um perfil antes de assumir o console!');
+        openProfileModal();
+        return;
+    }
+
+    if (latestHardwareOwner && latestHardwareOwner.active && latestHardwareOwner.remainingSec > 0) {
+        if (latestHardwareOwner.userId === currentUserId) {
+            const action = confirm(`Você está conectado ao console físico (tempo restante: ${formatHardwareTime(latestHardwareOwner.remainingSec)}).\n\nClique em OK para estender por mais 3 minutos, ou CANCELAR para liberar o console agora.`);
+            if (action) {
+                claimHardware(true);
+            } else {
+                releaseHardware();
+            }
+        } else {
+            openHardwareBusyModal(latestHardwareOwner);
+        }
+    } else {
+        claimHardware(false);
+    }
+}
+
 function updateProfileUI() {
     if (currentProfileNameEl) {
         currentProfileNameEl.textContent = currentUserName || 'Sem Perfil';
@@ -1334,6 +1527,10 @@ async function openProfileModal() {
         const res = await fetch('/api/state?action=list_users');
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
+        if (data.hardwareOwner) {
+            latestHardwareOwner = data.hardwareOwner;
+            updateHardwareUI();
+        }
         renderProfileList(data.users || []);
     } catch (e) {
         console.warn('Erro ao carregar lista de usuários:', e);
@@ -1431,6 +1628,10 @@ async function fetchUserProfileState(userId) {
         if (data.topPlayer) {
             latestTopPlayer = data.topPlayer;
         }
+        if (data.hardwareOwner) {
+            latestHardwareOwner = data.hardwareOwner;
+            updateHardwareUI();
+        }
         hasUnsavedChanges = false;
         updateSaveIndicator();
         renderStats();
@@ -1501,6 +1702,10 @@ async function saveUserProgressToCloud(isManual = false) {
 
         if (data && data.topPlayer) {
             latestTopPlayer = data.topPlayer;
+        }
+        if (data && data.hardwareOwner) {
+            latestHardwareOwner = data.hardwareOwner;
+            updateHardwareUI();
         }
 
         saveLocalState();
@@ -1730,6 +1935,18 @@ function initGame() {
         });
     }
 
+    if (btnClaimHardwareEl) {
+        btnClaimHardwareEl.addEventListener('click', handleHardwareClaimClick);
+    }
+    if (btnCancelHardwareClaimEl) {
+        btnCancelHardwareClaimEl.addEventListener('click', closeHardwareBusyModal);
+    }
+    if (btnConfirmHardwareTakeoverEl) {
+        btnConfirmHardwareTakeoverEl.addEventListener('click', () => {
+            claimHardware(true);
+        });
+    }
+
     buildShopList();
     buildPermTree();
 
@@ -1750,6 +1967,25 @@ function initGame() {
         updateStatusUI();
         renderStats();
     }, 1000); // Atualiza contadores, telemetria e estatísticas a cada segundo
+
+    // Consulta status de posse do console físico a cada 5s para sincronia rápida entre jogadores
+    setInterval(async () => {
+        if (document.visibilityState !== 'hidden') {
+            try {
+                const res = await fetch('/api/state?action=get_hardware_status');
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.hardwareOwner) {
+                        latestHardwareOwner = data.hardwareOwner;
+                        updateHardwareUI();
+                    }
+                    if (data.topPlayer) {
+                        latestTopPlayer = data.topPlayer;
+                    }
+                }
+            } catch (e) {}
+        }
+    }, 5000);
 
     // Inicia o motor gráfico irrestrito (suave e fluido)
     requestAnimationFrame(gameLoop);

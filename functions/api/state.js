@@ -69,10 +69,14 @@ const CORS_HEADERS = {
   'Content-Type': 'application/json; charset=utf-8'
 };
 
+const HARDWARE_LEASE_KEY = 'hardware:controller';
+const HARDWARE_LEASE_MS = 3 * 60 * 1000; // 3 minutos de posse por solicitação
+
 // Fallback em memória caso o binding MAKITA_KV ainda não esteja vinculado
 let memoryFallbackState = null;
 let memoryFallbackUsers = [];
 let memoryFallbackUserStates = {};
+let memoryFallbackHardwareLease = null;
 
 function getDefaultState() {
   const owned = {};
@@ -255,6 +259,7 @@ function getTopPlayer(usersList) {
     }
   }
   return {
+    id: top.id || null,
     name: top.name || 'Maker',
     makitas: top.makitas || 0,
     totalMakitasMade: top.totalMakitasMade || top.makitas || 0
@@ -415,6 +420,49 @@ async function saveState(env, state) {
   memoryFallbackState = state;
 }
 
+async function loadHardwareLease(env) {
+  const { kv } = getKV(env);
+  let lease = null;
+  if (kv) {
+    try {
+      lease = await kv.get(HARDWARE_LEASE_KEY, { type: 'json' });
+    } catch (err) {
+      console.error('[KV] Erro ao ler hardware lease:', err);
+    }
+  }
+  if (!lease) {
+    lease = memoryFallbackHardwareLease;
+  }
+
+  if (lease && typeof lease === 'object' && lease.userId) {
+    const now = Date.now();
+    if (lease.expiresAt && lease.expiresAt > now) {
+      return {
+        ...lease,
+        active: true,
+        remainingSec: Math.max(0, Math.ceil((lease.expiresAt - now) / 1000))
+      };
+    }
+  }
+  return { active: false, userId: null, userName: null, expiresAt: 0, remainingSec: 0 };
+}
+
+async function saveHardwareLease(env, lease) {
+  const { kv } = getKV(env);
+  if (kv) {
+    try {
+      if (lease) {
+        await kv.put(HARDWARE_LEASE_KEY, JSON.stringify(lease));
+      } else {
+        await kv.delete(HARDWARE_LEASE_KEY);
+      }
+    } catch (err) {
+      console.error('[KV] Erro ao salvar hardware lease:', err);
+    }
+  }
+  memoryFallbackHardwareLease = lease;
+}
+
 // ------------------- HANDLERS -------------------
 
 export async function onRequestOptions() {
@@ -430,12 +478,14 @@ export async function onRequestGet(context) {
   const { kvName, kvConnected, diag } = getKV(env);
   const usersList = await loadUsersList(env);
   const topPlayer = getTopPlayer(usersList);
+  const hardwareOwner = await loadHardwareLease(env);
 
   // 1. Rota de Listagem de Perfis
   if (action === 'list_users') {
     return new Response(JSON.stringify({
       users: usersList,
       topPlayer,
+      hardwareOwner,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE',
       _kv_diag: diag
@@ -454,6 +504,7 @@ export async function onRequestGet(context) {
     return new Response(JSON.stringify({
       ...state,
       topPlayer,
+      hardwareOwner,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE',
       _kv_diag: diag
@@ -471,6 +522,7 @@ export async function onRequestGet(context) {
   return new Response(JSON.stringify({
     ...state,
     topPlayer,
+    hardwareOwner,
     resetOrder: state.resetPendingEsp === true,
     _kv_connected: kvConnected,
     _kv_binding: kvName || 'NONE',
@@ -497,6 +549,107 @@ export async function onRequestPost(context) {
 
   const usersList = await loadUsersList(env);
   let topPlayer = getTopPlayer(usersList);
+  const hardwareOwner = await loadHardwareLease(env);
+
+  // -------------------------------------------------------------
+  // AÇÕES DE CONTROLE DO CONSOLE FÍSICO (ESP8266)
+  // -------------------------------------------------------------
+  if (action === 'get_hardware_status') {
+    return new Response(JSON.stringify({
+      success: true,
+      hardwareOwner,
+      topPlayer,
+      _kv_connected: kvConnected,
+      _kv_binding: kvName || 'NONE',
+      _kv_diag: diag
+    }), {
+      status: 200,
+      headers: CORS_HEADERS
+    });
+  }
+
+  if (action === 'claim_hardware') {
+    const userId = body.userId;
+    const userName = String(body.userName || '').trim().replace(/[\r\n\t]/g, '').slice(0, 25) || 'Maker';
+    const force = body.force === true;
+    const now = Date.now();
+
+    if (!userId) {
+      return new Response(JSON.stringify({ error: 'userId obrigatório' }), {
+        status: 400,
+        headers: CORS_HEADERS
+      });
+    }
+
+    const currentLease = await loadHardwareLease(env);
+
+    // Se outro usuário ativo estiver controlando e não for forçado
+    if (currentLease.active && currentLease.userId !== userId && !force) {
+      return new Response(JSON.stringify({
+        success: false,
+        busy: true,
+        owner: {
+          userId: currentLease.userId,
+          userName: currentLease.userName,
+          expiresAt: currentLease.expiresAt,
+          remainingSec: currentLease.remainingSec
+        },
+        message: `O console está sendo controlado por ${currentLease.userName}.`
+      }), {
+        status: 409,
+        headers: CORS_HEADERS
+      });
+    }
+
+    // Cria ou renova o lease por 3 minutos
+    const newLease = {
+      userId,
+      userName,
+      claimedAt: now,
+      expiresAt: now + HARDWARE_LEASE_MS,
+      leaseId: (currentLease?.leaseId || 0) + 1
+    };
+
+    await saveHardwareLease(env, newLease);
+
+    const activeOwner = {
+      ...newLease,
+      active: true,
+      remainingSec: Math.ceil(HARDWARE_LEASE_MS / 1000)
+    };
+
+    return new Response(JSON.stringify({
+      success: true,
+      hardwareOwner: activeOwner,
+      topPlayer,
+      _kv_connected: kvConnected,
+      _kv_binding: kvName || 'NONE',
+      _kv_diag: diag
+    }), {
+      status: 200,
+      headers: CORS_HEADERS
+    });
+  }
+
+  if (action === 'release_hardware') {
+    const userId = body.userId;
+    const currentLease = await loadHardwareLease(env);
+    if (currentLease.active && currentLease.userId === userId) {
+      await saveHardwareLease(env, null);
+    }
+
+    return new Response(JSON.stringify({
+      success: true,
+      hardwareOwner: { active: false, userId: null, userName: null, expiresAt: 0, remainingSec: 0 },
+      topPlayer,
+      _kv_connected: kvConnected,
+      _kv_binding: kvName || 'NONE',
+      _kv_diag: diag
+    }), {
+      status: 200,
+      headers: CORS_HEADERS
+    });
+  }
 
   // -------------------------------------------------------------
   // AÇÃO 1: CRIAR NOVO PERFIL DE USUÁRIO (Salvo imediatamente no KV)
@@ -528,6 +681,7 @@ export async function onRequestPost(context) {
       user: newUserEntry,
       state: initialState,
       topPlayer,
+      hardwareOwner,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE',
       _kv_diag: diag
@@ -562,6 +716,7 @@ export async function onRequestPost(context) {
         staleRejected: true,
         state: currentState,
         topPlayer,
+        hardwareOwner,
         _kv_connected: kvConnected,
         _kv_binding: kvName || 'NONE',
         _kv_diag: 'Save defasado descartado pelo servidor para evitar ressurreição de dados.'
@@ -602,6 +757,7 @@ export async function onRequestPost(context) {
       lastSavedAt: now,
       state: expanded,
       topPlayer,
+      hardwareOwner,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE',
       _kv_diag: diag
@@ -645,6 +801,7 @@ export async function onRequestPost(context) {
       isReset: true,
       state: freshState,
       topPlayer,
+      hardwareOwner,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE',
       _kv_diag: diag
@@ -669,6 +826,7 @@ export async function onRequestPost(context) {
       success: true,
       users: usersList,
       topPlayer,
+      hardwareOwner,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE',
       _kv_diag: diag
@@ -704,6 +862,7 @@ export async function onRequestPost(context) {
       deletedUserId: userId,
       users: updatedUsers,
       topPlayer,
+      hardwareOwner,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE',
       _kv_diag: diag
@@ -726,12 +885,13 @@ export async function onRequestPost(context) {
       await deleteUserState(env, u.id);
     }
     await saveUsersList(env, []);
-    topPlayer = { name: 'MakerSpace', makitas: 0, totalMakitasMade: 0 };
+    topPlayer = { id: null, name: 'MakerSpace', makitas: 0, totalMakitasMade: 0 };
 
     return new Response(JSON.stringify({
       success: true,
       users: [],
       topPlayer,
+      hardwareOwner,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE',
       _kv_diag: diag
@@ -762,6 +922,7 @@ export async function onRequestPost(context) {
       success: true,
       ...newState,
       topPlayer,
+      hardwareOwner,
       isReset: true,
       resetOrder: true,
       _kv_connected: kvConnected,
@@ -774,7 +935,7 @@ export async function onRequestPost(context) {
   }
 
   // -------------------------------------------------------------
-  // AÇÃO 3: FLUXO GLOBAL / HARDWARE ESP8266 & RESET
+  // AÇÃO 4: FLUXO GLOBAL / HARDWARE ESP8266 & RESET
   // -------------------------------------------------------------
   const { state } = await loadState(env);
   const now = Date.now();
@@ -797,6 +958,7 @@ export async function onRequestPost(context) {
     return new Response(JSON.stringify({
       ...newState,
       topPlayer,
+      hardwareOwner,
       isReset: true,
       resetOrder: true,
       _kv_connected: kvConnected,
@@ -808,35 +970,37 @@ export async function onRequestPost(context) {
     });
   }
 
-  // TRATAMENTO DA ORDEM DE RESET LATENTE:
-  // A ordem de reset para a ESP permanece ativa no KV até a ESP executar a limpeza e enviar resetAck: true.
-  let espAckReceived = false;
-  if (state.resetPendingEsp) {
-    if (isEsp && body.resetAck === true) {
-      state.resetPendingEsp = false;
-      state.lastResetAckAt = now;
-      espAckReceived = true;
-      // Garante que o estado permaneça zerado e limpo
-      state.makitas = 0.0;
-      state.totalMakitasMade = 0.0;
-      state.owned = {};
-      state.perms = {};
-      state.mps = 0.0;
-      state.clickPower = 1.0;
-    } else {
-      // Enquanto a ESP não executar o reset e enviar o ACK, rejeita qualquer dado antigo
-      clientMakitas = null;
-      clientTotal = null;
-      clicks = 0;
-      body.owned = null;
-      body.perms = null;
-      state.makitas = 0.0;
-      state.totalMakitasMade = 0.0;
-    }
-  }
-
-  // Telemetria reportada pela ESP8266
+  // -------------------------------------------------------------
+  // TRATAMENTO EXCLUSIVO DE SINCRONIZAÇÃO DA ESP8266
+  // -------------------------------------------------------------
   if (isEsp) {
+    if (state.resetPendingEsp) {
+      if (body.resetAck === true) {
+        state.resetPendingEsp = false;
+        state.lastResetAckAt = now;
+        state.makitas = 0.0;
+        state.totalMakitasMade = 0.0;
+        state.owned = {};
+        state.perms = {};
+        state.mps = 0.0;
+        state.clickPower = 1.0;
+        await saveState(env, state);
+      } else {
+        await saveState(env, state);
+        return new Response(JSON.stringify({
+          resetOrder: true,
+          topPlayer,
+          hardwareOwner,
+          _kv_connected: kvConnected,
+          _kv_binding: kvName || 'NONE',
+          _kv_diag: diag
+        }), {
+          status: 200,
+          headers: CORS_HEADERS
+        });
+      }
+    }
+
     state.espTelemetry = {
       lastPing: now,
       fwVersion: typeof body.fwVersion === 'number' ? body.fwVersion : (state.espTelemetry?.fwVersion || 0),
@@ -845,6 +1009,75 @@ export async function onRequestPost(context) {
       uptime: typeof body.uptime === 'number' ? body.uptime : (state.espTelemetry?.uptime || 0),
       freeHeap: typeof body.freeHeap === 'number' ? body.freeHeap : (state.espTelemetry?.freeHeap || 0)
     };
+
+    // Roteamento dinâmico de cliques e dados da ESP8266:
+    // Se houver dono ativo do console físico, credita e sincroniza com o perfil do dono.
+    // Se não houver dono ativo, credita e sincroniza com o 1º colocado (topPlayer).
+    const targetUserId = hardwareOwner.active ? hardwareOwner.userId : topPlayer.id;
+
+    if (targetUserId) {
+      let { state: targetState } = await loadUserState(env, targetUserId);
+      if (!targetState) {
+        targetState = getDefaultState();
+      }
+      advancePassiveProduction(targetState, now);
+
+      if (clicks > 0) {
+        const gainPerClick = getSingleClickGain(targetState.perms, targetState.mps);
+        const totalGain = gainPerClick * clicks;
+        targetState.makitas = (targetState.makitas || 0) + totalGain;
+        targetState.totalMakitasMade = (targetState.totalMakitasMade || 0) + totalGain;
+        targetState.lastSavedAt = now;
+      }
+
+      await saveUserState(env, targetUserId, targetState);
+
+      const uIdx = usersList.findIndex(u => u.id === targetUserId);
+      if (uIdx >= 0) {
+        usersList[uIdx].makitas = targetState.makitas;
+        usersList[uIdx].totalMakitasMade = targetState.totalMakitasMade;
+        usersList[uIdx].lastSavedAt = now;
+        await saveUsersList(env, usersList);
+      }
+      topPlayer = getTopPlayer(usersList);
+
+      state.espTelemetry.activeTargetUserId = targetUserId;
+      state.espTelemetry.activeTargetName = hardwareOwner.active ? hardwareOwner.userName : topPlayer.name;
+      state.lastUpdate = now;
+      await saveState(env, state);
+
+      return new Response(JSON.stringify({
+        targetUserId,
+        targetUserName: hardwareOwner.active ? hardwareOwner.userName : topPlayer.name,
+        makitas: targetState.makitas,
+        totalMakitasMade: targetState.totalMakitasMade,
+        owned: targetState.owned || {},
+        perms: targetState.perms || {},
+        mps: targetState.mps || 0,
+        clickPower: targetState.clickPower || 1,
+        topPlayer,
+        hardwareOwner,
+        resetOrder: false,
+        _kv_connected: kvConnected,
+        _kv_binding: kvName || 'NONE',
+        _kv_diag: diag
+      }), {
+        status: 200,
+        headers: CORS_HEADERS
+      });
+    }
+  }
+
+  // TRATAMENTO DA ORDEM DE RESET LATENTE PARA CLIENTE WEB:
+  let espAckReceived = false;
+  if (state.resetPendingEsp) {
+    clientMakitas = null;
+    clientTotal = null;
+    clicks = 0;
+    body.owned = null;
+    body.perms = null;
+    state.makitas = 0.0;
+    state.totalMakitasMade = 0.0;
   }
 
   // RECONCILIAÇÃO MONOTÔNICA E CONVERGÊNCIA (CRDT / RATCHET):
@@ -970,6 +1203,7 @@ export async function onRequestPost(context) {
   return new Response(JSON.stringify({
     ...state,
     topPlayer,
+    hardwareOwner,
     resetOrder: state.resetPendingEsp === true,
     _kv_connected: kvConnected,
     _kv_binding: kvName || 'NONE',

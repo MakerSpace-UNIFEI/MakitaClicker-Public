@@ -84,6 +84,12 @@ int pendingPhysicalClicks = 0;
 String topPlayerName = "";
 double topPlayerMakitas = 0.0;
 
+// Controle de Posse do Console Físico (Usuário Atual / Hardware Lease)
+bool hardwareOwnerActive = false;
+String hardwareOwnerName = "";
+unsigned long hardwareOwnerExpiresAtMillis = 0;
+String currentTargetUserId = "";
+
 const UpgradeConfig UPGRADE_CONFIGS[NUM_UPGRADES] = {
   { "upgrade1",          10.0,         1.10, 0.1 },        // +0.1 MPS
   { "upgrade_1mps",      100.0,        1.12, 1.0 },        // +1.0 MPS
@@ -227,24 +233,45 @@ void atualizarLCD() {
 
   char lineBuf[32];
 
-  // Linha 0: 1° Lugar / Nome do Líder
-  char scoreStr[16] = "";
-  if (topPlayerMakitas > 0) {
-    char numBuf[12];
-    formatarNumeroBuffer(topPlayerMakitas, numBuf, sizeof(numBuf));
-    snprintf(scoreStr, sizeof(scoreStr), " (%s)", numBuf);
-  }
-  const char* nome = (topPlayerName.length() > 0) ? topPlayerName.c_str() : "MakerSpace";
-  int maxNomeLen = 20 - 4 - (int)strlen(scoreStr); // 4 = strlen("1o: ")
-  char nomeTrunc[21];
-  if (maxNomeLen > 2 && (int)strlen(nome) > maxNomeLen) {
-    strncpy(nomeTrunc, nome, maxNomeLen);
-    nomeTrunc[maxNomeLen] = '\0';
+  // Linha 0: Dono Atual do Console OU 1° Lugar
+  if (hardwareOwnerActive) {
+    int remSec = 0;
+    if (hardwareOwnerExpiresAtMillis > now) {
+      remSec = (int)((hardwareOwnerExpiresAtMillis - now) / 1000UL);
+    }
+    char timeStr[16];
+    snprintf(timeStr, sizeof(timeStr), " (%02d:%02d)", remSec / 60, remSec % 60);
+
+    const char* nome = (hardwareOwnerName.length() > 0) ? hardwareOwnerName.c_str() : "Maker";
+    int maxNomeLen = 20 - 6 - (int)strlen(timeStr); // 6 = strlen("Dono: ")
+    char nomeTrunc[21];
+    if (maxNomeLen > 2 && (int)strlen(nome) > maxNomeLen) {
+      strncpy(nomeTrunc, nome, maxNomeLen);
+      nomeTrunc[maxNomeLen] = '\0';
+    } else {
+      strncpy(nomeTrunc, nome, sizeof(nomeTrunc));
+      nomeTrunc[sizeof(nomeTrunc) - 1] = '\0';
+    }
+    snprintf(lineBuf, sizeof(lineBuf), "Dono: %s%s", nomeTrunc, timeStr);
   } else {
-    strncpy(nomeTrunc, nome, sizeof(nomeTrunc));
-    nomeTrunc[sizeof(nomeTrunc) - 1] = '\0';
+    char scoreStr[16] = "";
+    if (topPlayerMakitas > 0) {
+      char numBuf[12];
+      formatarNumeroBuffer(topPlayerMakitas, numBuf, sizeof(numBuf));
+      snprintf(scoreStr, sizeof(scoreStr), " (%s)", numBuf);
+    }
+    const char* nome = (topPlayerName.length() > 0) ? topPlayerName.c_str() : "MakerSpace";
+    int maxNomeLen = 20 - 4 - (int)strlen(scoreStr); // 4 = strlen("1o: ")
+    char nomeTrunc[21];
+    if (maxNomeLen > 2 && (int)strlen(nome) > maxNomeLen) {
+      strncpy(nomeTrunc, nome, maxNomeLen);
+      nomeTrunc[maxNomeLen] = '\0';
+    } else {
+      strncpy(nomeTrunc, nome, sizeof(nomeTrunc));
+      nomeTrunc[sizeof(nomeTrunc) - 1] = '\0';
+    }
+    snprintf(lineBuf, sizeof(lineBuf), "1o: %s%s", nomeTrunc, scoreStr);
   }
-  snprintf(lineBuf, sizeof(lineBuf), "1o: %s%s", nomeTrunc, scoreStr);
   printLinhaFormatada(0, lineBuf);
 
   // Linha 1: Quantidade Atual de Makitas
@@ -589,63 +616,11 @@ void syncWithCloud() {
         Serial.println(F("[RESET] Confirmacao de reset (ACK) validada pela nuvem!"));
       }
 
-      // 1. Saldo Monotônico: adota se o servidor estiver com saldo maior
-      if (doc.containsKey("makitas")) {
-        double serverMakitas = doc["makitas"].as<double>();
-        if (serverMakitas > makitas) {
-          makitas = serverMakitas;
-          isFlashDirty = true;
-        }
-      }
-
       // Desconta cliques confirmados
       pendingPhysicalClicks -= clicksToSend;
       if (pendingPhysicalClicks < 0) pendingPhysicalClicks = 0;
 
-      // 2. Upgrades: NUNCA reduz. Mantém sempre o maior nível de cada oficina
-      bool statsChanged = false;
-      if (doc.containsKey("owned")) {
-        JsonObject ownedObj = doc["owned"].as<JsonObject>();
-        for (int i = 0; i < NUM_UPGRADES; i++) {
-          if (ownedObj.containsKey(UPGRADE_CONFIGS[i].id)) {
-            int serverVal = ownedObj[UPGRADE_CONFIGS[i].id].as<int>();
-            if (serverVal > ownedUpgrades[i]) {
-              ownedUpgrades[i] = serverVal;
-              statsChanged = true;
-              isFlashDirty = true;
-            }
-          }
-        }
-      }
-
-      // 3. Tecnologias Permanentes: Ativa localmente qualquer tecnologia liberada na nuvem
-      if (doc.containsKey("perms")) {
-        JsonObject permsObj = doc["perms"].as<JsonObject>();
-        #define CHECK_PERM(var, key) if (!var && (permsObj[key] | false)) { var = true; statsChanged = true; isFlashDirty = true; }
-        CHECK_PERM(permLubrificante, "perm_lubrificante");
-        CHECK_PERM(permDiscoDiamante, "perm_disco_diamante");
-        CHECK_PERM(permMotorBrushless, "perm_motor_brushless");
-        CHECK_PERM(permEmpunhadura, "perm_empunhadura");
-        CHECK_PERM(permBateriaLitio, "perm_bateria_litio");
-        CHECK_PERM(permIaMaker, "perm_ia_maker");
-        CHECK_PERM(permRefrigeracao, "perm_refrigeracao");
-        CHECK_PERM(permTitanio, "perm_titanio");
-        CHECK_PERM(permOverclock, "perm_overclock");
-        CHECK_PERM(permNanobots, "perm_nanobots");
-        CHECK_PERM(permSingularidade, "perm_singularidade");
-        CHECK_PERM(permPlasmaCutter, "perm_plasma_cutter");
-        CHECK_PERM(permFusaoFria, "perm_fusao_fria");
-        CHECK_PERM(permHiperconducao, "perm_hiperconducao");
-        CHECK_PERM(permSinergiaQuantica, "perm_sinergia_quantica");
-        CHECK_PERM(permLaserGama, "perm_laser_gama");
-        CHECK_PERM(permTaquions, "perm_taquions");
-        CHECK_PERM(permMateriaEscura, "perm_materia_escura");
-        CHECK_PERM(permHiperClique, "perm_hiper_clique");
-        CHECK_PERM(permOnipotenciaMaker, "perm_onipotencia_maker");
-        #undef CHECK_PERM
-      }
-
-      // 4. TELEMETRIA DO LÍDER DO RANKING (TOP PLAYER):
+      // 1. TELEMETRIA DO LÍDER DO RANKING (TOP PLAYER):
       if (doc["topPlayer"].is<JsonObject>()) {
         JsonObject topObj = doc["topPlayer"];
         const char* tName = topObj["name"] | "";
@@ -655,8 +630,142 @@ void syncWithCloud() {
         }
       }
 
-      if (statsChanged) {
+      // 2. CONTROLE DE POSSE DO CONSOLE FÍSICO (HARDWARE OWNER):
+      if (doc["hardwareOwner"].is<JsonObject>()) {
+        JsonObject hObj = doc["hardwareOwner"];
+        bool active = hObj["active"] | false;
+        if (active) {
+          hardwareOwnerActive = true;
+          hardwareOwnerName = String((const char*)(hObj["userName"] | "Maker"));
+          unsigned long remSec = hObj["remainingSec"] | 0;
+          hardwareOwnerExpiresAtMillis = millis() + (remSec * 1000UL);
+        } else {
+          hardwareOwnerActive = false;
+        }
+      }
+
+      // 3. ADOÇÃO OU RECONCILIAÇÃO DO USUÁRIO-ALVO (OWNER OU TOP PLAYER):
+      const char* rawTarget = doc["targetUserId"] | "";
+      String newTarget = String(rawTarget);
+      bool targetChanged = (newTarget.length() > 0 && newTarget != currentTargetUserId);
+      if (targetChanged) {
+        currentTargetUserId = newTarget;
+        Serial.printf("[TARGET] Alvo do console alterado para: %s\n", newTarget.c_str());
+        if (doc.containsKey("makitas")) {
+          makitas = doc["makitas"].as<double>();
+        }
+        for (int i = 0; i < NUM_UPGRADES; i++) {
+          ownedUpgrades[i] = 0;
+        }
+        if (doc.containsKey("owned")) {
+          JsonObject ownedObj = doc["owned"].as<JsonObject>();
+          for (int i = 0; i < NUM_UPGRADES; i++) {
+            if (ownedObj.containsKey(UPGRADE_CONFIGS[i].id)) {
+              ownedUpgrades[i] = ownedObj[UPGRADE_CONFIGS[i].id].as<int>();
+            }
+          }
+        }
+        permLubrificante = false;
+        permDiscoDiamante = false;
+        permMotorBrushless = false;
+        permEmpunhadura = false;
+        permBateriaLitio = false;
+        permIaMaker = false;
+        permRefrigeracao = false;
+        permTitanio = false;
+        permOverclock = false;
+        permNanobots = false;
+        permSingularidade = false;
+        permPlasmaCutter = false;
+        permFusaoFria = false;
+        permHiperconducao = false;
+        permSinergiaQuantica = false;
+        permLaserGama = false;
+        permTaquions = false;
+        permMateriaEscura = false;
+        permHiperClique = false;
+        permOnipotenciaMaker = false;
+        if (doc.containsKey("perms")) {
+          JsonObject permsObj = doc["perms"].as<JsonObject>();
+          permLubrificante = permsObj["perm_lubrificante"] | false;
+          permDiscoDiamante = permsObj["perm_disco_diamante"] | false;
+          permMotorBrushless = permsObj["perm_motor_brushless"] | false;
+          permEmpunhadura = permsObj["perm_empunhadura"] | false;
+          permBateriaLitio = permsObj["perm_bateria_litio"] | false;
+          permIaMaker = permsObj["perm_ia_maker"] | false;
+          permRefrigeracao = permsObj["perm_refrigeracao"] | false;
+          permTitanio = permsObj["perm_titanio"] | false;
+          permOverclock = permsObj["perm_overclock"] | false;
+          permNanobots = permsObj["perm_nanobots"] | false;
+          permSingularidade = permsObj["perm_singularidade"] | false;
+          permPlasmaCutter = permsObj["perm_plasma_cutter"] | false;
+          permFusaoFria = permsObj["perm_fusao_fria"] | false;
+          permHiperconducao = permsObj["perm_hiperconducao"] | false;
+          permSinergiaQuantica = permsObj["perm_sinergia_quantica"] | false;
+          permLaserGama = permsObj["perm_laser_gama"] | false;
+          permTaquions = permsObj["perm_taquions"] | false;
+          permMateriaEscura = permsObj["perm_materia_escura"] | false;
+          permHiperClique = permsObj["perm_hiper_clique"] | false;
+          permOnipotenciaMaker = permsObj["perm_onipotencia_maker"] | false;
+        }
         recalculateStats();
+        isFlashDirty = true;
+      } else {
+        // Saldo Monotônico dentro da mesma sessão de jogador
+        if (doc.containsKey("makitas")) {
+          double serverMakitas = doc["makitas"].as<double>();
+          if (serverMakitas > makitas) {
+            makitas = serverMakitas;
+            isFlashDirty = true;
+          }
+        }
+
+        // Upgrades: Mantém maior nível dentro da mesma sessão
+        bool statsChanged = false;
+        if (doc.containsKey("owned")) {
+          JsonObject ownedObj = doc["owned"].as<JsonObject>();
+          for (int i = 0; i < NUM_UPGRADES; i++) {
+            if (ownedObj.containsKey(UPGRADE_CONFIGS[i].id)) {
+              int serverVal = ownedObj[UPGRADE_CONFIGS[i].id].as<int>();
+              if (serverVal > ownedUpgrades[i]) {
+                ownedUpgrades[i] = serverVal;
+                statsChanged = true;
+                isFlashDirty = true;
+              }
+            }
+          }
+        }
+
+        // Tecnologias Permanentes
+        if (doc.containsKey("perms")) {
+          JsonObject permsObj = doc["perms"].as<JsonObject>();
+          #define CHECK_PERM(var, key) if (!var && (permsObj[key] | false)) { var = true; statsChanged = true; isFlashDirty = true; }
+          CHECK_PERM(permLubrificante, "perm_lubrificante");
+          CHECK_PERM(permDiscoDiamante, "perm_disco_diamante");
+          CHECK_PERM(permMotorBrushless, "perm_motor_brushless");
+          CHECK_PERM(permEmpunhadura, "perm_empunhadura");
+          CHECK_PERM(permBateriaLitio, "perm_bateria_litio");
+          CHECK_PERM(permIaMaker, "perm_ia_maker");
+          CHECK_PERM(permRefrigeracao, "perm_refrigeracao");
+          CHECK_PERM(permTitanio, "perm_titanio");
+          CHECK_PERM(permOverclock, "perm_overclock");
+          CHECK_PERM(permNanobots, "perm_nanobots");
+          CHECK_PERM(permSingularidade, "perm_singularidade");
+          CHECK_PERM(permPlasmaCutter, "perm_plasma_cutter");
+          CHECK_PERM(permFusaoFria, "perm_fusao_fria");
+          CHECK_PERM(permHiperconducao, "perm_hiperconducao");
+          CHECK_PERM(permSinergiaQuantica, "perm_sinergia_quantica");
+          CHECK_PERM(permLaserGama, "perm_laser_gama");
+          CHECK_PERM(permTaquions, "perm_taquions");
+          CHECK_PERM(permMateriaEscura, "perm_materia_escura");
+          CHECK_PERM(permHiperClique, "perm_hiper_clique");
+          CHECK_PERM(permOnipotenciaMaker, "perm_onipotencia_maker");
+          #undef CHECK_PERM
+        }
+
+        if (statsChanged) {
+          recalculateStats();
+        }
       }
 
       statusAtual = "Ativo";
@@ -864,7 +973,7 @@ void setup() {
 unsigned long lastTick = 0;
 unsigned long lastCloudSync = 0;
 unsigned long lastLocalSave = 0;
-const unsigned long CLOUD_SYNC_INTERVAL_MS = 5000;  // Sincronização a cada 5 segundos
+const unsigned long CLOUD_SYNC_INTERVAL_MS = 3000;  // Sincronização a cada 3 segundos (alta responsividade)
 const unsigned long LOCAL_SAVE_INTERVAL_MS = 30000; // Autosave condicional na flash a cada 30 segundos
 
 void gerenciarWiFi() {
@@ -933,7 +1042,23 @@ void loop() {
     }
   }
 
-  // 3. Atualização não-bloqueante e cadenciada do Display LCD 20x4
+  // 3. Gerenciamento do Timer de Posse do Hardware Físico
+  if (hardwareOwnerActive) {
+    if (now >= hardwareOwnerExpiresAtMillis) {
+      hardwareOwnerActive = false;
+      precisaAtualizarLCD = true;
+      forceCloudSync = true;
+      Serial.println(F("[HARDWARE] Posse expirada! Retornando console ao 1o lugar."));
+    } else {
+      static unsigned long lastCountdownTick = 0;
+      if (now - lastCountdownTick >= 1000) {
+        lastCountdownTick = now;
+        precisaAtualizarLCD = true;
+      }
+    }
+  }
+
+  // 4. Atualização não-bloqueante e cadenciada do Display LCD 20x4
   if (precisaAtualizarLCD && (now - ultimoUpdateLCD >= INTERVALO_UPDATE_LCD)) {
     precisaAtualizarLCD = false;
     ultimoUpdateLCD = now;

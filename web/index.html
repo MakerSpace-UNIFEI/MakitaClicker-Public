@@ -39,6 +39,7 @@
             <div class="profile-actions">
                 <span class="save-indicator" id="saveStatusText">🟢 Sincronizado</span>
                 <button class="btn-save-cloud" id="btnSaveCloud" title="Salvar progresso no Cloudflare KV">💾 Salvar na Nuvem</button>
+                <button class="btn-hardware-claim" id="btnClaimHardware" title="Assumir o console físico ESP8266 para direcionar os cliques físicos para seu perfil">⚡ Assumir Console</button>
             </div>
         </div>
 
@@ -224,6 +225,13 @@
                         <div class="stat-card__val" id="statResetOrder" style="font-size: 1rem; color: var(--text-lo);">Nenhuma</div>
                         <div class="stat-card__hint" id="statResetAck">Status de sincronismo</div>
                     </div>
+
+                    <!-- Card 9: Dono Atual do Hardware Físico -->
+                    <div class="stat-card">
+                        <div class="stat-card__label">Controle do Hardware Físico</div>
+                        <div class="stat-card__val" id="statHardwareOwner" style="font-size: 1.05rem;">Livre (1º Lugar)</div>
+                        <div class="stat-card__hint" id="statHardwareOwnerHint">Cliques creditados ao Líder</div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -268,6 +276,30 @@
                 <input type="text" id="newProfileInput" class="profile-input" placeholder="Seu nome ou apelido (ex: Victor, Nicolae...)" maxlength="25" autocomplete="off" required>
                 <button type="submit" class="profile-btn-create" id="btnCreateProfile">Criar Perfil e Jogar 🚀</button>
             </form>
+        </div>
+    </div>
+</div>
+
+<!-- Modal de Conflito de Posse do Hardware Físico -->
+<div class="modal-overlay" id="hardwareBusyModal" style="display: none;">
+    <div class="modal-dialog">
+        <div class="modal-header">
+            <h2 class="modal-title">🎮 Console Físico em Uso</h2>
+            <p class="modal-subtitle">Outro jogador está conectado ao hardware físico da ESP8266 neste momento.</p>
+        </div>
+        <div class="modal-section" style="text-align: center; margin: 1.5rem 0;">
+            <div style="font-size: 3rem; margin-bottom: 0.5rem;">⚡</div>
+            <p id="hardwareBusyMessage" style="font-size: 1.05rem; line-height: 1.5; color: var(--text-hi);">
+                O console está sendo controlado por <strong id="hardwareBusyOwnerName">Maker</strong>.<br>
+                Tempo restante: <span id="hardwareBusyRemainingTime" style="color: var(--teal); font-weight: bold; font-family: var(--mono);">--:--</span>
+            </p>
+            <p style="font-size: 0.85rem; color: var(--text-lo); margin-top: 0.8rem;">
+                Você pode aguardar o tempo expirar ou assumir o controle imediatamente.
+            </p>
+        </div>
+        <div class="modal-actions" style="display: flex; gap: 0.8rem; justify-content: flex-end;">
+            <button type="button" class="btn-cancel" id="btnCancelHardwareClaim" style="background: var(--bg-card); color: var(--text-mid); border: 1px solid var(--border); padding: 0.6rem 1.2rem; border-radius: 6px; cursor: pointer;">Cancelar</button>
+            <button type="button" class="btn-confirm-takeover" id="btnConfirmHardwareTakeover" style="background: linear-gradient(135deg, var(--orange), #d97706); color: #fff; border: none; padding: 0.6rem 1.2rem; border-radius: 6px; font-weight: bold; cursor: pointer;">⚡ Tomar Controle Agora</button>
         </div>
     </div>
 </div>
