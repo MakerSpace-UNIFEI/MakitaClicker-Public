@@ -54,7 +54,7 @@ char prevLcdLines[4][21] = {"", "", "", ""};
 // Variáveis de controle de conexão Wi-Fi e reconexão infinita
 unsigned long ultimoWifiRetry = 0;
 bool wifiConectadoAnterior = false;
-const unsigned long WIFI_RETRY_INTERVAL_MS = 20000; // Retry a cada 20 segundos
+const unsigned long WIFI_RETRY_INTERVAL_MS = 10000; // Retry a cada 10 segundos
 
 const int NUM_UPGRADES = 24;
 
@@ -812,8 +812,9 @@ void setup() {
   } else {
     wifiConectadoAnterior = false;
     statusAtual = "Offline";
-    Serial.println(F("[WiFi] Falha inicial. Entrando em Modo Offline (retry 20s)"));
-    printLinhaFormatada(3, "Modo Offline (20s)  ");
+    ultimoWifiRetry = millis();
+    Serial.println(F("[WiFi] Falha inicial. Entrando em Modo Offline (retry a cada 10s)..."));
+    printLinhaFormatada(3, "Modo Offline (10s)  ");
     delay(600);
   }
 
@@ -845,15 +846,21 @@ void gerenciarWiFi() {
   } else {
     if (wifiConectadoAnterior) {
       wifiConectadoAnterior = false;
-      Serial.println(F("[WiFi] Conexao perdida. Modo Offline ativo."));
+      Serial.println(F("[WiFi] Conexao perdida. Modo Offline ativo (retry 10s)."));
       statusAtual = "Offline";
       precisaAtualizarLCD = true;
     }
 
-    // Tentativa periódica infinita a cada 20 segundos
+    // Após 4s de tentativa sem sucesso, exibe "Offline" no LCD aguardando o próximo ciclo de 10s
+    if (strcmp(statusAtual, "Offline") != 0 && (now - ultimoWifiRetry >= 4000)) {
+      statusAtual = "Offline";
+      precisaAtualizarLCD = true;
+    }
+
+    // Tentativa periódica infinita a cada 10 segundos
     if (now - ultimoWifiRetry >= WIFI_RETRY_INTERVAL_MS) {
       ultimoWifiRetry = now;
-      Serial.println(F("[WiFi] Tentando reconectar (retry 20s)..."));
+      Serial.println(F("[WiFi] Tentando reconectar (retry 10s)..."));
       statusAtual = "Conectando";
       precisaAtualizarLCD = true;
       WiFi.disconnect();
@@ -895,7 +902,7 @@ void loop() {
     atualizarLCD();
   }
 
-  // 4. Gerenciamento de Wi-Fi Não-Bloqueante (Retry Infinito a cada 20s)
+  // 4. Gerenciamento de Wi-Fi Não-Bloqueante (Retry Infinito a cada 10s)
   gerenciarWiFi();
 
   // 5. Autosave condicional na flash LittleFS a cada 30s (Proteção contra desgaste prematuro)
