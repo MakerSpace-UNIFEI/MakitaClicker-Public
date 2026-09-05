@@ -705,11 +705,12 @@ void checkOTA() {
 
   String payload = http.getString();
   http.end();
+  client.stop(); // Libera socket e memória antes do parse e download pesado
 
 #if ARDUINOJSON_VERSION_MAJOR >= 7
   JsonDocument doc;
 #else
-  DynamicJsonDocument doc(256);
+  DynamicJsonDocument doc(512);
 #endif
   DeserializationError err = deserializeJson(doc, payload);
   if (err) {
@@ -719,16 +720,19 @@ void checkOTA() {
 
   int remoteVersion = doc["firmware_version"] | 0;
   const char* fwUrl = doc["firmware_url"] | "";
+  const char* fwMd5 = doc["firmware_md5"] | "";
 
   Serial.printf("[OTA] Local FW=%d | Remoto FW=%d\n", CURRENT_FIRMWARE_VER, remoteVersion);
 
   if (remoteVersion > CURRENT_FIRMWARE_VER && strlen(fwUrl) > 0) {
-    // Salva estado pendente na flash antes de iniciar a atualização OTA
+    // 1. Salva estado pendente e desmonta o LittleFS para proteger setores da flash
     if (isFlashDirty) {
       saveLocalGameState();
       isFlashDirty = false;
     }
+    LittleFS.end();
 
+    // 2. Feedback visual inicial no LCD
     if (lcd) {
       lcd->clear();
       for (int i = 0; i < 4; i++) prevLcdLines[i][0] = '\0';
@@ -737,18 +741,52 @@ void checkOTA() {
       char vBuf[21];
       snprintf(vBuf, sizeof(vBuf), " v%d -> v%d", CURRENT_FIRMWARE_VER, remoteVersion);
       printLinhaFormatada(2, vBuf);
-      printLinhaFormatada(3, ">> BAIXANDO FW... <<");
+      printLinhaFormatada(3, ">> GRAVANDO:  0% <<");
     }
-    client.stop();
-    Serial.println(F("[OTA] Atualizando Firmware..."));
+
+    Serial.println(F("[OTA] Conectando para download do binario..."));
+
+    // 3. Cliente TLS dedicado com buffer completo para suportar records de 16KB da Cloudflare
+    WiFiClientSecure otaClient;
+    otaClient.setInsecure();
+
+    // 4. Configuração de segurança e tolerância a redirecionamentos
+    ESPhttpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     ESPhttpUpdate.rebootOnUpdate(true);
-    t_httpUpdate_return ret = ESPhttpUpdate.update(client, fwUrl);
-    Serial.printf("[OTA] Falha no FW update: %s\n", ESPhttpUpdate.getLastErrorString().c_str());
+
+    if (strlen(fwMd5) > 0) {
+      Serial.printf("[OTA] Checksum MD5 esperado: %s\n", fwMd5);
+      ESPhttpUpdate.setMD5sum(fwMd5);
+    }
+
+    // 5. Hook de progresso com atualização no LCD
+    ESPhttpUpdate.onProgress([](int cur, int total) {
+      if (total > 0 && lcd) {
+        int pct = (cur * 100) / total;
+        static int lastPct = -1;
+        if (pct != lastPct) {
+          lastPct = pct;
+          char progBuf[21];
+          snprintf(progBuf, sizeof(progBuf), ">> GRAVANDO: %2d%% <<", pct);
+          printLinhaFormatada(3, progBuf);
+        }
+      }
+      yield();
+    });
+
+    // 6. Executa a gravação na flash e reboot automático
+    t_httpUpdate_return ret = ESPhttpUpdate.update(otaClient, fwUrl);
+
+    // Se chegou aqui, houve falha no update (rebootOnUpdate=true reinicia automaticamente se OK)
+    Serial.printf("[OTA] Falha no FW update (%d): %s\n", ret, ESPhttpUpdate.getLastErrorString().c_str());
+
+    // Remonta o sistema de arquivos após falha
+    LittleFS.begin();
 
     if (lcd) {
       printLinhaFormatada(1, "  FALHA NO OTA!     ");
       printLinhaFormatada(3, "Tentando depois...  ");
-      delay(1500);
+      delay(2500);
       for (int i = 0; i < 4; i++) prevLcdLines[i][0] = '\0';
     }
   }
