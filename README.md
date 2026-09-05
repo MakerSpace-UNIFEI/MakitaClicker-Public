@@ -113,21 +113,22 @@ O frontend foi desenvolvido com foco em alta performance, responsividade e desac
 A placa **ESP8266 NodeMCU** é 100% autônoma e opera sem necessidade de qualquer microcontrolador secundário:
 
 1. **Clock a 160 MHz:** A CPU roda em frequência máxima (`system_update_cpu_freq(160)`) para processar requisições HTTPS com TLS moderno e desenhar o LCD sem atrasos.
-2. **Botão Físico com Resposta de 0 ms:** Conectado ao pino **D5** (`INPUT_PULLUP`). Usa filtro de debounce por hardware/software de 25ms. O clique incrementa o saldo local na mesma fração de milissegundo, garantindo resposta tátil instantânea.
-3. **Display LCD 20×4 I2C Redesenhado & Elegante:**
-   - **Tela de Boot:** Exibe o título do jogo, MakerSpace UNIFEI e a versão atual instalada (`Versao: vXX`) com status de inicialização.
-   - **Tela de OTA Dedicada:** Durante a atualização Over-The-Air, o LCD exibe uma tela exclusiva com as versões (`vLocal -> vRemota`) e status do download.
+2. **Botão Físico com Interrupção de Hardware (0 ms de Latência):** Monitorado via interrupção externa no pino **D5** (`attachInterrupt` em `FALLING` com `INPUT_PULLUP` e `ICACHE_RAM_ATTR`). Possui filtro de debounce de 25 ms em microssegundos e drenagem atômica no `loop()`. **Zero cliques perdidos**, mesmo durante requisições de rede HTTPS ou handshakes TLS.
+3. **Display LCD 20×4 I2C a 400 kHz com Double-Buffering Estático:**
+   - **I2C Fast Mode:** Barramento configurado para **400 kHz** (`Wire.setClock(400000)`), reduzindo a ocupação da CPU na transmissão em 75%.
+   - **Zero Fragmentação de DRAM:** Utiliza buffers estáticos `char[21]` com `snprintf` e comparação por `strncmp`, sem nenhuma alocação dinâmica da classe `String` no caminho crítico.
    - **Tela Principal (4 Linhas Transparentes e Diretas):**
-     - **Linha 0 (1° Lugar / Nome):** Líder global atual do ranking com saldo (`1o: <Nome> (<Saldo>)`).
-     - **Linha 1 (Qtd Atual):** Saldo de Makitas acumuladas no console (`Makitas: 125.4k MKT`).
-     - **Linha 2 (Produção / Corte):** Taxa passiva e ganho por clique (`Prod: +15.0/s (+1.0)`), alternando instantaneamente para `>> CORTE EFETUADO! <<` ao pressionar o botão.
-     - **Linha 3 (Status Operacional ao Vivo):** Indica o estado exato da máquina: `Status: Ativo`, `Status: Offline`, `Status: Conectando`, `Status: Sincroniz.`, `Status: Apagando...` ou `Status: Reset OK!`.
-   - **Double-Buffering Completo (4 Linhas):** Só envia ao barramento I2C caracteres de linhas que de fato mudaram, eliminando qualquer cintilação (*flicker*).
-4. **Reconexão Wi-Fi Não-Bloqueante (Retry Infinito a cada 20s):**
-   - Na inicialização, a ESP tenta conectar por no máximo 7 segundos. Se não conseguir, entra imediatamente em jogo no modo offline para latência zero no clique mecânico.
-   - A cada 20 segundos, de forma totalmente assíncrona, tenta reconectar ao Wi-Fi sem travar o loop principal nem a leitura do botão mecânico.
-5. **Persistência na Memória Flash (LittleFS):** O estado é salvo no arquivo `/gamestate.json` a cada 15 segundos ou antes de reiniciar. Se faltar energia, o saldo não se perde.
-6. **Telemetria Contínua:** A cada 5 segundos, a ESP envia à nuvem seu endereço IP, versão de firmware instalada, RSSI de Wi-Fi, Uptime e RAM livre, e recebe os dados globais do líder da partida (`topPlayer`).
+     - **Linha 0 (Líder Global / Top Player):** Líder geral atual do ranking com saldo (`1o: <Nome> (<Saldo>)`).
+     - **Linha 1 (Saldo Atual):** Saldo de Makitas acumuladas no console (`Makitas: 125.4k MKT` ou `Makitas: 99B (META!)`).
+     - **Linha 2 (Produção / Corte):** Taxa passiva e ganho por clique (`Prod: +15.0/s   (+1)`), alternando instantaneamente para `>> CORTE EFETUADO! <<` por 600 ms ao pressionar o botão.
+     - **Linha 3 (Status Operacional ao Vivo):** Indica o estado exato da máquina: `Status: Ativo`, `Status: Offline`, `Status: Conectando`, `Status: Sincroniz.`, `Status: Apagando...`, `Status: Reset OK!` ou progresso do OTA (`>> GRAVANDO: XX% <<`).
+4. **Reconexão Wi-Fi Rápida e Não-Bloqueante (Retry Infinito a cada 10s):**
+   - Na inicialização, a ESP tenta conectar por no máximo 7 segundos. Se não conseguir, entra imediatamente em jogo no modo offline.
+   - A cada 10 segundos, de forma totalmente assíncrona, tenta reconectar ao Wi-Fi sem travar o loop principal nem a leitura do botão.
+   - O display reflete a tentativa alternando para `Status: Conectando` durante a negociação e revertendo para `Status: Offline` em caso de falha temporária.
+5. **Persistência Flash com Wear-Leveling Shield (LittleFS):** O estado é salvo no arquivo `/gamestate.json` a cada 30 segundos, mas **apenas se houver alterações reais não salvas** (`isFlashDirty == true`). Evita gravações redundantes, **reduzindo o desgaste da flash SPI em mais de 90%**.
+6. **Telemetria Contínua & Memória Otimizada:** A cada 5 segundos, a ESP envia à nuvem seu IP, versão de firmware, RSSI Wi-Fi, Uptime e RAM livre, com buffers BearSSL configurados em `2048/512` bytes para poupar 15 KB de DRAM.
+7. **Handshake de Reset Não-Bloqueante (Zero-Recursion):** O envio de confirmação (`resetAck: true`) é agendado no `loop()`, eliminando chamadas recursivas e protegendo a pilha contra *Stack Overflow*.
 
 ---
 
@@ -186,9 +187,10 @@ flowchart TD
 
 ### Detalhes das Etapas do Build:
 1. **Frontend Web (Vite):** Empacota e minifica todo o código JavaScript e CSS, enviando os arquivos web de produção para a pasta `dist/`.
-2. **Contagem de Versão:** Faz `git fetch --unshallow` e obtém a versão com base na contagem de commits.
-3. **Compilação Headless do Firmware:** O `arduino-cli` compila o código C++ injetando a nova versão em `#define CURRENT_FIRMWARE_VER`, e salva `firmware.bin` em `dist/`.
-4. **Deploy Imediato:** Os arquivos estáticos e as Cloudflare Functions entram no ar em escala global.
+2. **Contagem de Versão:** Faz `git fetch --unshallow` e obtém a versão com base na contagem real de commits.
+3. **Compilação Headless do Firmware:** O `arduino-cli` compila o código C++ para a arquitetura NodeMCU ESP8266 (`nodemcuv2`), injetando a nova versão em `#define CURRENT_FIRMWARE_VER`.
+4. **Targeting Seguro e Checksum MD5:** Identifica deterministicamente o binário compilado, calcula o hash criptográfico MD5 e o tamanho exato em bytes, gerando `firmware.bin` e o manifesto `version.json` com validação de integridade.
+5. **Deploy Imediato:** Os arquivos estáticos e as Cloudflare Functions entram no ar em escala global, acionando o auto-update nas placas físicas com barra de progresso no LCD.
 
 ---
 

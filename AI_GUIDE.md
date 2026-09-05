@@ -40,9 +40,11 @@ O projeto é um jogo incremental (Cookie Clicker) **híbrido** (Físico + Web).
 
 ### Firmware (C++ ESP8266)
 - **Sem bloqueios:** É proibido usar `delay()` no loop principal. Toda temporização deve ser não-bloqueante usando `millis()` ou `yield()`.
-- **Display LCD (I2C):** O LCD (20x4) usa "double-buffering". Só envie comandos via I2C (`printLinhaFormatada`) para caracteres/linhas que de fato mudaram. Isso evita cintilação (flicker).
-- **Top Player na Tela:** Na rotação de telas informativas da Linha 3 do LCD, o firmware exibe o jogador líder global do site: `Top: <nome> (<saldo>)`.
-- **LittleFS:** O estado é persistido em `/gamestate.json`. Nunca bloqueie o loop principal com gravações longas desnecessárias. Apenas a cada 15 segundos.
+- **Interrupção de Hardware:** A leitura do botão físico no pino D5 deve sempre ser tratada por ISR (`ICACHE_RAM_ATTR`) com debounce por microssegundos e drenagem atômica no `loop()`, garantindo zero perda de cliques.
+- **Display LCD (I2C 400 kHz):** O LCD (20x4) usa double-buffering estático em `char[21]` com `snprintf` e comparação por `strncmp`. Nunca use alocações dinâmicas de `String` no caminho de desenho.
+- **Top Player na Tela:** A Linha 0 do LCD exibe o líder do ranking global recebido via nuvem (`1o: <nome> (<saldo>)`).
+- **LittleFS Wear-Leveling Shield:** O estado é persistido em `/gamestate.json` a cada 30 segundos, mas **apenas se houver alterações pendentes** (`isFlashDirty == true`). Sempre execute `LittleFS.end()` antes de gravações de OTA.
+- **OTA Seguro:** O manifesto `version.json` exige validação por checksum criptográfico MD5 (`setMD5sum`) e buffer BearSSL completo para records de 16 KB.
 
 ## 🛠️ 3. Como Adicionar Funcionalidades (Playbook)
 
