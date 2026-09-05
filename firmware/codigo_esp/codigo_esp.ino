@@ -8,11 +8,29 @@
 #include <LiquidCrystal_I2C.h>
 #include <math.h>
 
-// ===== CONFIGURAÇÃO DE HARDWARE (100% AUTÔNOMO NA ESP8266) =====
+// =====================================================================
+// MAKITA CLICKER — FIRMWARE EMBARCADO ESP8266 (EDIÇÃO DE ALTA PERFORMANCE)
+// 100% Autônomo · Xtensa LX106 @ 160MHz · ISR Botão 0ms · Zero-Recursion
+// LittleFS Flash Wear-Leveling Shield · Static Buffers · BearSSL Tuned
+// =====================================================================
+
+// ===== CONFIGURAÇÃO DE HARDWARE =====
 // I2C Display LCD 20x4: SDA = D2 (GPIO4), SCL = D1 (GPIO5), VCC = VV (5V), GND = GND
 // Botão Físico: Pino D5 (GPIO14) com INPUT_PULLUP (fecha no GND ao pressionar)
 const int PIN_BOTAO = D5;
-const unsigned long DEBOUNCE_MS = 25; // Filtro de 25ms para microswitches mecânicos
+const unsigned long DEBOUNCE_MICROS = 25000; // 25ms de filtro para microswitches mecânicos
+
+// Fila volátil de interrupção externa (garante ZERO perda de cliques mesmo sob TLS)
+volatile uint32_t isrPendingClicks = 0;
+volatile unsigned long lastIsrMicros = 0;
+
+void ICACHE_RAM_ATTR isrBotao() {
+  unsigned long now = micros();
+  if (now - lastIsrMicros >= DEBOUNCE_MICROS) {
+    lastIsrMicros = now;
+    isrPendingClicks++;
+  }
+}
 
 // Ponteiro dinâmico para o LCD (permite auto-detecção de endereço I2C: 0x27, 0x3F, etc.)
 LiquidCrystal_I2C* lcd = nullptr;
@@ -20,26 +38,23 @@ LiquidCrystal_I2C* lcd = nullptr;
 // Controle de atualização desacoplada do LCD (elimina latência I2C)
 bool precisaAtualizarLCD = false;
 unsigned long ultimoUpdateLCD = 0;
-const unsigned long INTERVALO_UPDATE_LCD = 75; // ~13 FPS para não sobrecarregar I2C
-
-// Controle do Botão Físico
-bool estadoAnteriorBotao = HIGH;
-unsigned long ultimoTempoBotao = 0;
+const unsigned long INTERVALO_UPDATE_LCD = 75; // ~13 FPS cadenciado
 
 // Feedback visual de clique
 unsigned long ultimoClickVisual = 0;
 const unsigned long duracaoFeedbackClick = 600;
 
-// Status operacional da ESP (exibido na Linha 3 do LCD: Ativo, Offline, Conectando, Sincroniz., Apagando..., Reset OK!)
-String statusAtual = "Iniciando";
+// Status operacional da ESP
+const char* statusAtual = "Iniciando";
 
-// Double-buffering nas 4 linhas do LCD para eliminar flicker e latência I2C
-String prevLcdLines[4] = {"", "", "", ""};
+// Double-buffering estático nas 4 linhas do LCD para eliminar flicker e latência I2C
+// Zero uso de String no hot path para eliminar fragmentação de Heap na SRAM
+char prevLcdLines[4][21] = {"", "", "", ""};
 
 // Variáveis de controle de conexão Wi-Fi e reconexão infinita
 unsigned long ultimoWifiRetry = 0;
 bool wifiConectadoAnterior = false;
-const unsigned long WIFI_RETRY_INTERVAL_MS = 20000; // Retry infinito a cada 20 segundos
+const unsigned long WIFI_RETRY_INTERVAL_MS = 20000; // Retry a cada 20 segundos
 
 const int NUM_UPGRADES = 24;
 
@@ -50,7 +65,7 @@ struct UpgradeConfig {
   double mps;
 };
 
-// ===== VERSÃO LOCAL — gerenciado automaticamente pelo build.sh =====
+// ===== VERSÃO LOCAL — gerenciado automaticamente pelo build-firmware.sh =====
 #define CURRENT_FIRMWARE_VER 0
 
 const char* VERSION_URL = "https://makitaclicker.pages.dev/version.json";
@@ -120,9 +135,12 @@ bool permMateriaEscura = false;     // (bit 17) +300% MPS global
 bool permHiperClique = false;       // (bit 18) 10x multiplicador de poder de clique
 bool permOnipotenciaMaker = false;  // (bit 19) +500% MPS global, +30% MPS/clique, 4x oficinas
 
-// Cache de MPS e Poder de Clique
+// Cache local de MPS e Poder de Clique
 double cachedMps = 0.0;
 double cachedClickPower = 1.0;
+
+// Proteção de Flash SPI: Dirty Tracking para prolongar vida útil dos setores
+bool isFlashDirty = false;
 
 // Auto-detecta endereço I2C do display LCD (0x27, 0x3F, etc.)
 uint8_t detectarEnderecoI2C() {
@@ -136,56 +154,70 @@ uint8_t detectarEnderecoI2C() {
   return 0x27; // Endereço padrão fallback
 }
 
-// Formatação inteligente e ultra compacta de números para o LCD 20x4
-String formatarNumero(double num) {
-  if (num < 0) return "0";
+// Formatação estática de números ultra-compacta (Zero Alocação Dinâmica)
+void formatarNumeroBuffer(double num, char* out, size_t outSize) {
+  if (!out || outSize == 0) return;
+  if (num < 0) {
+    snprintf(out, outSize, "0");
+    return;
+  }
   if (num < 10.0) {
     if (fabs(num - (long)num) > 0.05) {
-      return String(num, 1);
+      snprintf(out, outSize, "%.1f", num);
+    } else {
+      snprintf(out, outSize, "%ld", (long)(num + 0.5));
     }
-    return String((long)(num + 0.5));
   } else if (num < 999.5) {
-    return String((long)(num + 0.5));
+    snprintf(out, outSize, "%ld", (long)(num + 0.5));
   } else if (num < 999500.0) {
     double k = num / 1000.0;
-    if (k < 9.995) return String(k, 2) + "k";
-    if (k < 99.95) return String(k, 1) + "k";
-    return String((long)(k + 0.5)) + "k";
+    if (k < 9.995) snprintf(out, outSize, "%.2fk", k);
+    else if (k < 99.95) snprintf(out, outSize, "%.1fk", k);
+    else snprintf(out, outSize, "%ldk", (long)(k + 0.5));
   } else if (num < 999500000.0) {
     double m = num / 1000000.0;
-    if (m < 9.995) return String(m, 2) + "M";
-    if (m < 99.95) return String(m, 1) + "M";
-    return String((long)(m + 0.5)) + "M";
+    if (m < 9.995) snprintf(out, outSize, "%.2fM", m);
+    else if (m < 99.95) snprintf(out, outSize, "%.1fM", m);
+    else snprintf(out, outSize, "%ldM", (long)(m + 0.5));
   } else if (num < 999500000000.0) {
     double b = num / 1000000000.0;
-    if (b < 9.995) return String(b, 2) + "B";
-    if (b < 99.95) return String(b, 1) + "B";
-    return String((long)(b + 0.5)) + "B";
+    if (b < 9.995) snprintf(out, outSize, "%.2fB", b);
+    else if (b < 99.95) snprintf(out, outSize, "%.1fB", b);
+    else snprintf(out, outSize, "%ldB", (long)(b + 0.5));
   } else if (num < 999500000000000.0) {
     double t = num / 1000000000000.0;
-    if (t < 9.995) return String(t, 2) + "T";
-    if (t < 99.95) return String(t, 1) + "T";
-    return String((long)(t + 0.5)) + "T";
+    if (t < 9.995) snprintf(out, outSize, "%.2fT", t);
+    else if (t < 99.95) snprintf(out, outSize, "%.1fT", t);
+    else snprintf(out, outSize, "%ldT", (long)(t + 0.5));
   } else {
     double q = num / 1000000000000000.0;
-    return String(q, (q < 9.995 ? 2 : 1)) + "Qa";
+    if (q < 9.995) snprintf(out, outSize, "%.2fQa", q);
+    else snprintf(out, outSize, "%.1fQa", q);
   }
 }
 
-void printLinhaFormatada(int linha, String texto) {
-  if (!lcd || linha < 0 || linha >= 4) return;
-  while (texto.length() < 20) {
-    texto += " ";
+// Double-buffering sem alocação dinâmica com preenchimento exato de 20 colunas
+void printLinhaFormatada(int linha, const char* texto) {
+  if (!lcd || linha < 0 || linha >= 4 || !texto) return;
+
+  char formatted[21];
+  size_t len = strlen(texto);
+  if (len > 20) len = 20;
+
+  memcpy(formatted, texto, len);
+  for (size_t i = len; i < 20; i++) {
+    formatted[i] = ' ';
   }
-  if (texto.length() > 20) {
-    texto = texto.substring(0, 20);
-  }
-  if (texto == prevLcdLines[linha]) {
+  formatted[20] = '\0';
+
+  // Se a linha não mudou, economiza tráfego no barramento I2C
+  if (strncmp(formatted, prevLcdLines[linha], 20) == 0) {
     return;
   }
-  prevLcdLines[linha] = texto;
+
+  memcpy(prevLcdLines[linha], formatted, 21);
   lcd->setCursor(0, linha);
-  lcd->print(texto);
+  lcd->print(formatted);
 }
 
 void atualizarLCD() {
@@ -193,52 +225,71 @@ void atualizarLCD() {
   unsigned long now = millis();
   bool clickAtivo = (now - ultimoClickVisual < duracaoFeedbackClick);
 
+  char lineBuf[32];
+
   // Linha 0: 1° Lugar / Nome do Líder
-  String topStr;
-  String nome = (topPlayerName.length() > 0) ? topPlayerName : "MakerSpace";
+  char scoreStr[16] = "";
   if (topPlayerMakitas > 0) {
-    String scoreStr = " (" + formatarNumero(topPlayerMakitas) + ")";
-    int maxNomeLen = 20 - 4 - (int)scoreStr.length();
-    if (maxNomeLen > 2 && (int)nome.length() > maxNomeLen) {
-      nome = nome.substring(0, maxNomeLen);
-    }
-    topStr = "1o: " + nome + scoreStr;
-  } else {
-    topStr = "1o: " + nome;
+    char numBuf[12];
+    formatarNumeroBuffer(topPlayerMakitas, numBuf, sizeof(numBuf));
+    snprintf(scoreStr, sizeof(scoreStr), " (%s)", numBuf);
   }
-  printLinhaFormatada(0, topStr);
+  const char* nome = (topPlayerName.length() > 0) ? topPlayerName.c_str() : "MakerSpace";
+  int maxNomeLen = 20 - 4 - (int)strlen(scoreStr); // 4 = strlen("1o: ")
+  char nomeTrunc[21];
+  if (maxNomeLen > 2 && (int)strlen(nome) > maxNomeLen) {
+    strncpy(nomeTrunc, nome, maxNomeLen);
+    nomeTrunc[maxNomeLen] = '\0';
+  } else {
+    strncpy(nomeTrunc, nome, sizeof(nomeTrunc));
+    nomeTrunc[sizeof(nomeTrunc) - 1] = '\0';
+  }
+  snprintf(lineBuf, sizeof(lineBuf), "1o: %s%s", nomeTrunc, scoreStr);
+  printLinhaFormatada(0, lineBuf);
 
   // Linha 1: Quantidade Atual de Makitas
-  String qtdStr;
   if (makitas >= 99000000000.0) {
-    qtdStr = "Makitas: 99B (META!)";
+    printLinhaFormatada(1, "Makitas: 99B (META!)");
   } else {
-    qtdStr = "Makitas: " + formatarNumero(makitas) + " MKT";
+    char mktBuf[12];
+    formatarNumeroBuffer(makitas, mktBuf, sizeof(mktBuf));
+    snprintf(lineBuf, sizeof(lineBuf), "Makitas: %s MKT", mktBuf);
+    printLinhaFormatada(1, lineBuf);
   }
-  printLinhaFormatada(1, qtdStr);
 
   // Linha 2: Produção Atual ou Feedback Visual de Corte
   if (clickAtivo) {
     printLinhaFormatada(2, ">> CORTE EFETUADO! <<");
   } else {
-    String prodStr = "Prod: +" + formatarNumero(cachedMps) + "/s";
-    String clkStr = "(+" + formatarNumero(cachedClickPower) + ")";
-    int espaco = 20 - (int)prodStr.length();
-    if (espaco >= (int)clkStr.length() + 1) {
-      while ((int)prodStr.length() < 20 - (int)clkStr.length()) {
-        prodStr += " ";
-      }
-      prodStr += clkStr;
+    char mpsBuf[12];
+    char clkBuf[12];
+    formatarNumeroBuffer(cachedMps, mpsBuf, sizeof(mpsBuf));
+    formatarNumeroBuffer(cachedClickPower, clkBuf, sizeof(clkBuf));
+
+    char clkFormatted[16];
+    snprintf(clkFormatted, sizeof(clkFormatted), "(+%s)", clkBuf);
+    char prodPrefix[20];
+    snprintf(prodPrefix, sizeof(prodPrefix), "Prod: +%s/s", mpsBuf);
+
+    int espaco = 20 - (int)strlen(prodPrefix) - (int)strlen(clkFormatted);
+    if (espaco >= 1) {
+      char spaces[21];
+      memset(spaces, ' ', espaco);
+      spaces[espaco] = '\0';
+      snprintf(lineBuf, sizeof(lineBuf), "%s%s%s", prodPrefix, spaces, clkFormatted);
+    } else {
+      snprintf(lineBuf, sizeof(lineBuf), "%s", prodPrefix);
     }
-    printLinhaFormatada(2, prodStr);
+    printLinhaFormatada(2, lineBuf);
   }
 
   // Linha 3: Status Operacional (Ativo, Offline, Conectando, Sincroniz., Apagando..., Reset OK!)
-  printLinhaFormatada(3, "Status: " + statusAtual);
+  snprintf(lineBuf, sizeof(lineBuf), "Status: %s", statusAtual);
+  printLinhaFormatada(3, lineBuf);
 }
 
 void recalculateStats() {
-  // Poder de clique
+  // Poder de clique base
   double power = 1.0;
   if (permDiscoDiamante) power += 1.0;
   if (permTitanio) power += 3.0;
@@ -253,7 +304,7 @@ void recalculateStats() {
   for (int i = 0; i < NUM_UPGRADES; i++) {
     baseMps += ((double)ownedUpgrades[i] * UPGRADE_CONFIGS[i].mps);
   }
-  
+
   // Multiplicadores base de oficinas
   double workshopMultiplier = 1.0;
   if (permMotorBrushless) workshopMultiplier *= 2.0;
@@ -277,21 +328,24 @@ void recalculateStats() {
   cachedMps = baseMps * multiplier;
 }
 
-// Processamento Instantâneo de Clique Físico (0ms de latência)
-void handleClick() {
-  double gain = cachedClickPower;
+// Processamento atômico de rajadas de cliques acumulados pela ISR
+void handleClicks(uint32_t count) {
+  if (count == 0) return;
+
+  double gainPerClick = cachedClickPower;
   if (permOnipotenciaMaker) {
-    gain += (cachedMps * 0.30);
+    gainPerClick += (cachedMps * 0.30);
   } else if (permSinergiaQuantica) {
-    gain += (cachedMps * 0.20);
+    gainPerClick += (cachedMps * 0.20);
   } else if (permOverclock) {
-    gain += (cachedMps * 0.10);
+    gainPerClick += (cachedMps * 0.10);
   } else if (permEmpunhadura) {
-    gain += (cachedMps * 0.05);
+    gainPerClick += (cachedMps * 0.05);
   }
 
-  makitas += gain;
-  pendingPhysicalClicks++;
+  makitas += (gainPerClick * (double)count);
+  pendingPhysicalClicks += count;
+  isFlashDirty = true;
   ultimoClickVisual = millis();
   precisaAtualizarLCD = true;
 }
@@ -395,9 +449,9 @@ void saveLocalGameState() {
   permsObj["perm_nanobots"] = permNanobots;
   permsObj["perm_singularidade"] = permSingularidade;
   permsObj["perm_plasma_cutter"] = permPlasmaCutter;
-  permsObj["perm_fusao_fria"] = permFusaoFria;
+  permsObj["perm_fusaoFria"] = permFusaoFria;
   permsObj["perm_hiperconducao"] = permHiperconducao;
-  permsObj["perm_sinergia_quantica"] = permSinergiaQuantica;
+  permsObj["perm_sinergiaQuantica"] = permSinergiaQuantica;
   permsObj["perm_laser_gama"] = permLaserGama;
   permsObj["perm_taquions"] = permTaquions;
   permsObj["perm_materia_escura"] = permMateriaEscura;
@@ -414,8 +468,8 @@ void saveLocalGameState() {
 }
 
 // Controle de Reset Remoto da ESP
-long lastProcessedResetId = 0;
 bool hasPendingResetAck = false;
+bool forceCloudSync = false;
 
 // ===== SINCRONIZAÇÃO COM A NUVEM (ESP = RECEIVER, SERVIDOR = MASTER) =====
 void syncWithCloud() {
@@ -430,9 +484,12 @@ void syncWithCloud() {
   atualizarLCD();
 
   WiFiClientSecure client;
-  client.setInsecure(); // Economia de RAM no ESP8266
+  client.setInsecure();
+  // Alocação consciente de buffers BearSSL: economiza ~15 KB de Heap na SRAM
+  client.setBufferSizes(2048, 512);
 
   HTTPClient http;
+  http.setTimeout(2500); // Timeout estrito de 2.5s para evitar travamento da CPU
   http.begin(client, STATE_URL);
   http.addHeader("Content-Type", "application/json");
 
@@ -444,7 +501,7 @@ void syncWithCloud() {
   DynamicJsonDocument reqDoc(512);
 #endif
   reqDoc["action"] = "sync";
-  reqDoc["source"] = "esp";          // Identifica origem como ESP
+  reqDoc["source"] = "esp";
   reqDoc["clicks"] = clicksToSend;
   reqDoc["makitas"] = makitas;
   reqDoc["fwVersion"] = CURRENT_FIRMWARE_VER;
@@ -453,7 +510,6 @@ void syncWithCloud() {
   reqDoc["uptime"] = (unsigned long)(millis() / 1000);
   reqDoc["freeHeap"] = ESP.getFreeHeap();
 
-  // Envia check de confirmação (ACK) se a limpeza foi executada
   if (hasPendingResetAck) {
     reqDoc["resetAck"] = true;
   }
@@ -468,13 +524,12 @@ void syncWithCloud() {
 #if ARDUINOJSON_VERSION_MAJOR >= 7
     JsonDocument doc;
 #else
-    DynamicJsonDocument doc(4096);
+    DynamicJsonDocument doc(3072);
 #endif
     DeserializationError err = deserializeJson(doc, responsePayload);
 
     if (!err) {
       // 0. TRATAMENTO DA ORDEM DE RESET LATENTE VINDA DA NUVEM:
-      // A ordem permanece ativa no servidor até a ESP enviar o ACK
       bool resetOrder = doc["resetOrder"] | false;
 
       if (resetOrder) {
@@ -512,6 +567,7 @@ void syncWithCloud() {
 
         recalculateStats();
         saveLocalGameState();
+        isFlashDirty = false;
 
         // Marca ACK pendente e notifica no LCD
         hasPendingResetAck = true;
@@ -522,9 +578,8 @@ void syncWithCloud() {
         http.end();
         client.stop();
 
-        // Envia o ACK imediatamente de volta ao servidor para desativar a ordem latente
-        delay(150);
-        syncWithCloud();
+        // ZERO RECURSÃO: Agenda sincronização imediata no próximo loop
+        forceCloudSync = true;
         return;
       }
 
@@ -539,6 +594,7 @@ void syncWithCloud() {
         double serverMakitas = doc["makitas"].as<double>();
         if (serverMakitas > makitas) {
           makitas = serverMakitas;
+          isFlashDirty = true;
         }
       }
 
@@ -547,6 +603,7 @@ void syncWithCloud() {
       if (pendingPhysicalClicks < 0) pendingPhysicalClicks = 0;
 
       // 2. Upgrades: NUNCA reduz. Mantém sempre o maior nível de cada oficina
+      bool statsChanged = false;
       if (doc.containsKey("owned")) {
         JsonObject ownedObj = doc["owned"].as<JsonObject>();
         for (int i = 0; i < NUM_UPGRADES; i++) {
@@ -554,6 +611,8 @@ void syncWithCloud() {
             int serverVal = ownedObj[UPGRADE_CONFIGS[i].id].as<int>();
             if (serverVal > ownedUpgrades[i]) {
               ownedUpgrades[i] = serverVal;
+              statsChanged = true;
+              isFlashDirty = true;
             }
           }
         }
@@ -562,26 +621,28 @@ void syncWithCloud() {
       // 3. Tecnologias Permanentes: Ativa localmente qualquer tecnologia liberada na nuvem
       if (doc.containsKey("perms")) {
         JsonObject permsObj = doc["perms"].as<JsonObject>();
-        if (permsObj["perm_lubrificante"] | false) permLubrificante = true;
-        if (permsObj["perm_disco_diamante"] | false) permDiscoDiamante = true;
-        if (permsObj["perm_motor_brushless"] | false) permMotorBrushless = true;
-        if (permsObj["perm_empunhadura"] | false) permEmpunhadura = true;
-        if (permsObj["perm_bateria_litio"] | false) permBateriaLitio = true;
-        if (permsObj["perm_ia_maker"] | false) permIaMaker = true;
-        if (permsObj["perm_refrigeracao"] | false) permRefrigeracao = true;
-        if (permsObj["perm_titanio"] | false) permTitanio = true;
-        if (permsObj["perm_overclock"] | false) permOverclock = true;
-        if (permsObj["perm_nanobots"] | false) permNanobots = true;
-        if (permsObj["perm_singularidade"] | false) permSingularidade = true;
-        if (permsObj["perm_plasma_cutter"] | false) permPlasmaCutter = true;
-        if (permsObj["perm_fusao_fria"] | false) permFusaoFria = true;
-        if (permsObj["perm_hiperconducao"] | false) permHiperconducao = true;
-        if (permsObj["perm_sinergia_quantica"] | false) permSinergiaQuantica = true;
-        if (permsObj["perm_laser_gama"] | false) permLaserGama = true;
-        if (permsObj["perm_taquions"] | false) permTaquions = true;
-        if (permsObj["perm_materia_escura"] | false) permMateriaEscura = true;
-        if (permsObj["perm_hiper_clique"] | false) permHiperClique = true;
-        if (permsObj["perm_onipotencia_maker"] | false) permOnipotenciaMaker = true;
+        #define CHECK_PERM(var, key) if (!var && (permsObj[key] | false)) { var = true; statsChanged = true; isFlashDirty = true; }
+        CHECK_PERM(permLubrificante, "perm_lubrificante");
+        CHECK_PERM(permDiscoDiamante, "perm_disco_diamante");
+        CHECK_PERM(permMotorBrushless, "perm_motor_brushless");
+        CHECK_PERM(permEmpunhadura, "perm_empunhadura");
+        CHECK_PERM(permBateriaLitio, "perm_bateria_litio");
+        CHECK_PERM(permIaMaker, "perm_ia_maker");
+        CHECK_PERM(permRefrigeracao, "perm_refrigeracao");
+        CHECK_PERM(permTitanio, "perm_titanio");
+        CHECK_PERM(permOverclock, "perm_overclock");
+        CHECK_PERM(permNanobots, "perm_nanobots");
+        CHECK_PERM(permSingularidade, "perm_singularidade");
+        CHECK_PERM(permPlasmaCutter, "perm_plasma_cutter");
+        CHECK_PERM(permFusaoFria, "perm_fusao_fria");
+        CHECK_PERM(permHiperconducao, "perm_hiperconducao");
+        CHECK_PERM(permSinergiaQuantica, "perm_sinergia_quantica");
+        CHECK_PERM(permLaserGama, "perm_laser_gama");
+        CHECK_PERM(permTaquions, "perm_taquions");
+        CHECK_PERM(permMateriaEscura, "perm_materia_escura");
+        CHECK_PERM(permHiperClique, "perm_hiper_clique");
+        CHECK_PERM(permOnipotenciaMaker, "perm_onipotencia_maker");
+        #undef CHECK_PERM
       }
 
       // 4. TELEMETRIA DO LÍDER DO RANKING (TOP PLAYER):
@@ -594,8 +655,10 @@ void syncWithCloud() {
         }
       }
 
-      recalculateStats();
-      saveLocalGameState();
+      if (statsChanged) {
+        recalculateStats();
+      }
+
       statusAtual = "Ativo";
       precisaAtualizarLCD = true;
       Serial.printf("[CLOUD] Sync OK! Saldo: %.1f | MPS: %.1f\n", makitas, cachedMps);
@@ -625,8 +688,10 @@ void checkOTA() {
 
   WiFiClientSecure client;
   client.setInsecure();
+  client.setBufferSizes(2048, 512);
 
   HTTPClient http;
+  http.setTimeout(3000);
   String checkUrl = String(VERSION_URL) + "?t=" + String(millis());
   http.begin(client, checkUrl);
   http.addHeader("Cache-Control", "no-cache");
@@ -658,12 +723,20 @@ void checkOTA() {
   Serial.printf("[OTA] Local FW=%d | Remoto FW=%d\n", CURRENT_FIRMWARE_VER, remoteVersion);
 
   if (remoteVersion > CURRENT_FIRMWARE_VER && strlen(fwUrl) > 0) {
+    // Salva estado pendente na flash antes de iniciar a atualização OTA
+    if (isFlashDirty) {
+      saveLocalGameState();
+      isFlashDirty = false;
+    }
+
     if (lcd) {
       lcd->clear();
-      for (int i = 0; i < 4; i++) prevLcdLines[i] = "";
+      for (int i = 0; i < 4; i++) prevLcdLines[i][0] = '\0';
       printLinhaFormatada(0, "====================");
       printLinhaFormatada(1, "  ATUALIZANDO OTA   ");
-      printLinhaFormatada(2, " v" + String(CURRENT_FIRMWARE_VER) + " -> v" + String(remoteVersion));
+      char vBuf[21];
+      snprintf(vBuf, sizeof(vBuf), " v%d -> v%d", CURRENT_FIRMWARE_VER, remoteVersion);
+      printLinhaFormatada(2, vBuf);
       printLinhaFormatada(3, ">> BAIXANDO FW... <<");
     }
     client.stop();
@@ -676,20 +749,22 @@ void checkOTA() {
       printLinhaFormatada(1, "  FALHA NO OTA!     ");
       printLinhaFormatada(3, "Tentando depois...  ");
       delay(1500);
-      for (int i = 0; i < 4; i++) prevLcdLines[i] = "";
+      for (int i = 0; i < 4; i++) prevLcdLines[i][0] = '\0';
     }
   }
 }
 
 void setup() {
-  system_update_cpu_freq(160); // 160MHz para máxima velocidade e estabilidade
+  system_update_cpu_freq(160); // 160MHz para máxima velocidade de processamento
   Serial.begin(115200);
 
-  // Configuração do Botão Físico
+  // Configuração do Botão Físico com Interrupção de Hardware
   pinMode(PIN_BOTAO, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(PIN_BOTAO), isrBotao, FALLING);
 
-  // Inicialização do Barramento I2C nos pinos D2 (SDA) e D1 (SCL)
+  // Inicialização do Barramento I2C nos pinos D2 (SDA) e D1 (SCL) a 400 kHz (Fast Mode)
   Wire.begin(D2, D1);
+  Wire.setClock(400000);
 
   // Auto-detecta endereço e inicializa LCD 20x4
   uint8_t lcdAddr = detectarEnderecoI2C();
@@ -698,10 +773,12 @@ void setup() {
   lcd->backlight();
   lcd->clear();
 
-  // Tela de Inicialização com versão atual
+  // Tela de Inicialização
   printLinhaFormatada(0, "====================");
   printLinhaFormatada(1, "   MAKITA CLICKER   ");
-  printLinhaFormatada(2, "    Versao: v" + String(CURRENT_FIRMWARE_VER));
+  char vInitBuf[21];
+  snprintf(vInitBuf, sizeof(vInitBuf), "    Versao: v%d", CURRENT_FIRMWARE_VER);
+  printLinhaFormatada(2, vInitBuf);
   printLinhaFormatada(3, "Iniciando sistema...");
 
   // Carrega save da flash LittleFS imediatamente
@@ -741,7 +818,7 @@ void setup() {
   }
 
   // Limpa buffer de linhas para desenhar a Tela Principal
-  for (int i = 0; i < 4; i++) prevLcdLines[i] = "";
+  for (int i = 0; i < 4; i++) prevLcdLines[i][0] = '\0';
   atualizarLCD();
 }
 
@@ -749,7 +826,7 @@ unsigned long lastTick = 0;
 unsigned long lastCloudSync = 0;
 unsigned long lastLocalSave = 0;
 const unsigned long CLOUD_SYNC_INTERVAL_MS = 5000;  // Sincronização a cada 5 segundos
-const unsigned long LOCAL_SAVE_INTERVAL_MS = 15000; // Autosave na flash a cada 15 segundos
+const unsigned long LOCAL_SAVE_INTERVAL_MS = 30000; // Autosave condicional na flash a cada 30 segundos
 
 void gerenciarWiFi() {
   unsigned long now = millis();
@@ -788,13 +865,18 @@ void gerenciarWiFi() {
 void loop() {
   unsigned long now = millis();
 
-  // 1. Leitura do Botão Físico no Pino D5 (disparo instantâneo com INPUT_PULLUP)
-  bool leitura = digitalRead(PIN_BOTAO);
-  if (leitura == LOW && estadoAnteriorBotao == HIGH && (now - ultimoTempoBotao > DEBOUNCE_MS)) {
-    ultimoTempoBotao = now;
-    handleClick();
+  // 1. Drenagem atômica de cliques físicos capturados via Interrupção de Hardware no pino D5
+  uint32_t clicksToProcess = 0;
+  if (isrPendingClicks > 0) {
+    noInterrupts();
+    clicksToProcess = isrPendingClicks;
+    isrPendingClicks = 0;
+    interrupts();
   }
-  estadoAnteriorBotao = leitura;
+
+  if (clicksToProcess > 0) {
+    handleClicks(clicksToProcess);
+  }
 
   // 2. Produção passiva local contínua entre ciclos de sync
   if (now - lastTick >= 100) {
@@ -816,14 +898,16 @@ void loop() {
   // 4. Gerenciamento de Wi-Fi Não-Bloqueante (Retry Infinito a cada 20s)
   gerenciarWiFi();
 
-  // 5. Autosave na flash LittleFS a cada 15 segundos (proteção contra perda de energia)
-  if (now - lastLocalSave >= LOCAL_SAVE_INTERVAL_MS) {
+  // 5. Autosave condicional na flash LittleFS a cada 30s (Proteção contra desgaste prematuro)
+  if (isFlashDirty && (now - lastLocalSave >= LOCAL_SAVE_INTERVAL_MS)) {
     lastLocalSave = now;
     saveLocalGameState();
+    isFlashDirty = false;
   }
 
-  // 6. Sincronização periódica com a Nuvem (Cloudflare Pages & KV) a cada 5 segundos
-  if (now - lastCloudSync >= CLOUD_SYNC_INTERVAL_MS) {
+  // 6. Sincronização periódica com a Nuvem a cada 5 segundos ou imediata após Reset
+  if (forceCloudSync || (now - lastCloudSync >= CLOUD_SYNC_INTERVAL_MS)) {
+    forceCloudSync = false;
     lastCloudSync = now;
     if (WiFi.status() == WL_CONNECTED) {
       syncWithCloud();
