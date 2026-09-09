@@ -4,7 +4,7 @@
 // Master de Estado + Sincronização Inteligente (Cloud Master / Client Slave)
 // =====================================================================
 
-import gameConfig from './game-config.json' with { type: 'json' };
+import gameConfig from './game-config.json';
 
 const KV_KEY = 'gamestate';
 const USERS_LIST_KEY = 'users:list';
