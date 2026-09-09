@@ -74,7 +74,21 @@ async function checkIpBan(env, ip) {
     }
   }
 
-  // 2. Checagem no Cloudflare KV
+  // 2. Checagem no Cloudflare D1
+  const db = getD1(env);
+  if (db) {
+    try {
+      await ensureD1Tables(db);
+      const row = await db.prepare('SELECT banned_until, reason FROM ip_bans WHERE ip = ?').bind(ip).first();
+      if (row && row.banned_until > now) {
+        memoryBannedIps.set(ip, { bannedAt: now, expiresAt: row.banned_until, reason: row.reason, ip });
+        const remainingSec = Math.ceil((row.banned_until - now) / 1000);
+        return { banned: true, remainingSec, banExpiresAt: row.banned_until, reason: row.reason };
+      }
+    } catch (e) {}
+  }
+
+  // 3. Checagem no Cloudflare KV
   const { kv } = getKV(env);
   if (kv) {
     try {
@@ -98,6 +112,19 @@ async function applyIpBan(env, ip, reason = 'Uso de auto-clicker detectado') {
 
   memoryBannedIps.set(ip, banData);
 
+  // 1. Grava no Cloudflare D1
+  const db = getD1(env);
+  if (db) {
+    try {
+      await ensureD1Tables(db);
+      await db.prepare('INSERT OR REPLACE INTO ip_bans (ip, banned_until, reason) VALUES (?, ?, ?)')
+        .bind(ip, expiresAt, reason).run();
+    } catch (e) {
+      console.error(`[ANTI-CLICKER] Erro ao gravar banimento do IP ${ip} no D1:`, e);
+    }
+  }
+
+  // 2. Grava no Cloudflare KV como backup
   const { kv } = getKV(env);
   if (kv) {
     try {
@@ -312,37 +339,87 @@ function getKV(env) {
     return { kv: env.MAKITA_KV, name: 'MAKITA_KV', kvName: 'MAKITA_KV', kvConnected: true, diag: 'MAKITA_KV conectado com sucesso.' };
   }
   for (const [key, val] of Object.entries(env)) {
-    if (key === 'ASSETS') continue; // Ignora o repositório interno de assets estáticos do Pages
+    if (key === 'ASSETS') continue;
     if (val && typeof val.get === 'function' && typeof val.put === 'function') {
       return { kv: val, name: key, kvName: key, kvConnected: true, diag: `KV detectado via binding alternativo: '${key}'` };
     }
   }
 
-  // Diagnóstico detalhado para troubleshooting no Cloudflare Pages
   const keys = Object.keys(env).filter(k => k !== 'ASSETS');
   const makitaType = typeof env.MAKITA_KV;
   let diag = '';
-
   if (makitaType === 'string') {
-    diag = "Atenção: MAKITA_KV está definida como STRING (Variável de Ambiente comum). No Cloudflare Pages, ela deve ser vinculada como 'KV namespace binding' em Settings > Functions > KV namespace bindings.";
+    diag = "Atenção: MAKITA_KV está definida como STRING. No Pages, deve ser vinculada em Settings > Functions > KV namespace bindings.";
   } else if (makitaType === 'undefined') {
-    if (keys.length === 0) {
-      diag = "Nenhum binding ou variável foi injetado neste deploy. Se você já configurou o binding no painel, é OBRIGATÓRIO disparar um NOVO deploy (ou clicar em 'Retry deployment') para que a Cloudflare aplique as alterações.";
-    } else {
-      diag = `Binding MAKITA_KV não encontrado em env (chaves presentes: [${keys.join(', ')}]). Se configurou recentemente, dispare um novo deploy.`;
-    }
+    diag = keys.length === 0 ? "Nenhum binding ou variável foi injetado neste deploy." : `Binding MAKITA_KV não encontrado em env (chaves presentes: [${keys.join(', ')}]).`;
   } else {
-    diag = `MAKITA_KV está presente como '${makitaType}', mas não possui os métodos esperados de KV (.get / .put).`;
+    diag = `MAKITA_KV está presente como '${makitaType}', mas não possui os métodos esperados (.get / .put).`;
   }
-
   return { kv: null, name: null, kvName: null, kvConnected: false, diag };
+}
+
+function getD1(env) {
+  if (!env) return null;
+  if (env.DB && typeof env.DB.prepare === 'function') {
+    return env.DB;
+  }
+  for (const [key, val] of Object.entries(env)) {
+    if (key === 'ASSETS') continue;
+    if (val && typeof val.prepare === 'function') {
+      return val;
+    }
+  }
+  return null;
+}
+
+let d1TablesChecked = false;
+async function ensureD1Tables(db) {
+  if (d1TablesChecked || !db) return;
+  try {
+    await db.batch([
+      db.prepare(`CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        last_saved_at INTEGER NOT NULL,
+        makitas REAL DEFAULT 0,
+        total_makitas_made REAL DEFAULT 0
+      )`),
+      db.prepare(`CREATE TABLE IF NOT EXISTS user_states (
+        user_id TEXT PRIMARY KEY,
+        state_json TEXT NOT NULL,
+        save_rev INTEGER DEFAULT 0,
+        reset_epoch INTEGER DEFAULT 0,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+      )`),
+      db.prepare(`CREATE TABLE IF NOT EXISTS hardware_lease (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        user_id TEXT,
+        user_name TEXT,
+        claimed_at INTEGER,
+        expires_at INTEGER,
+        lease_id INTEGER DEFAULT 0
+      )`),
+      db.prepare(`INSERT OR IGNORE INTO hardware_lease (id, user_id, user_name, claimed_at, expires_at, lease_id)
+        VALUES (1, NULL, 'Maker', 0, 0, 0)`),
+      db.prepare(`CREATE TABLE IF NOT EXISTS ip_bans (
+        ip TEXT PRIMARY KEY,
+        banned_until INTEGER NOT NULL,
+        reason TEXT
+      )`),
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_users_total_makitas ON users(total_makitas_made DESC)`)
+    ]);
+    d1TablesChecked = true;
+  } catch (e) {
+    console.warn('[D1] Verificação de tabelas D1:', e);
+  }
 }
 
 // Produção passiva autoritativa baseada no delta de tempo.
 function advancePassiveProduction(state, now) {
   const last = state.lastUpdate || now;
   const dt = Math.max(0, (now - last) / 1000.0);
-  // Garante que o MPS não fique zerado se houver upgrades
   const calculatedMps = calculateMps(state.owned, state.perms);
   if ((!state.mps || state.mps <= 0) && calculatedMps > 0) {
     state.mps = calculatedMps;
@@ -369,6 +446,26 @@ function sanitizeNick(raw) {
 
 async function saveUserMeta(env, userEntry) {
   if (!userEntry || !userEntry.id) return;
+  const db = getD1(env);
+  if (db) {
+    try {
+      await ensureD1Tables(db);
+      await db.prepare(`
+        INSERT OR REPLACE INTO users (id, name, created_at, last_saved_at, makitas, total_makitas_made)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).bind(
+        userEntry.id,
+        userEntry.name || 'Maker',
+        userEntry.createdAt || Date.now(),
+        userEntry.lastSavedAt || Date.now(),
+        Number(userEntry.makitas) || 0,
+        Number(userEntry.totalMakitasMade) || 0
+      ).run();
+    } catch (err) {
+      console.error(`[D1] Erro ao gravar usuário no D1:`, err);
+    }
+  }
+
   const { kv } = getKV(env);
   if (kv) {
     try {
@@ -380,6 +477,49 @@ async function saveUserMeta(env, userEntry) {
 }
 
 async function loadUsersList(env) {
+  const db = getD1(env);
+  if (db) {
+    try {
+      await ensureD1Tables(db);
+      const { results } = await db.prepare(
+        'SELECT id, name, created_at as createdAt, last_saved_at as lastSavedAt, makitas, total_makitas_made as totalMakitasMade FROM users ORDER BY total_makitas_made DESC LIMIT 100'
+      ).all();
+
+      if (results && results.length > 0) {
+        memoryFallbackUsers = results;
+        return results;
+      }
+
+      // Se o D1 estiver vazio mas houver dados no KV, migra automaticamente do KV para o D1!
+      const { kv } = getKV(env);
+      if (kv) {
+        const kvUsers = await kv.get(USERS_LIST_KEY, { type: 'json' }).catch(() => null);
+        if (Array.isArray(kvUsers) && kvUsers.length > 0) {
+          console.log(`[D1 MIGRATION] Migrando ${kvUsers.length} usuários do KV para o D1...`);
+          for (const u of kvUsers) {
+            if (u && u.id) {
+              await db.prepare(
+                'INSERT OR REPLACE INTO users (id, name, created_at, last_saved_at, makitas, total_makitas_made) VALUES (?, ?, ?, ?, ?, ?)'
+              ).bind(
+                u.id,
+                u.name || 'Maker',
+                u.createdAt || Date.now(),
+                u.lastSavedAt || Date.now(),
+                Number(u.makitas) || 0,
+                Number(u.totalMakitasMade) || 0
+              ).run().catch(() => {});
+            }
+          }
+          memoryFallbackUsers = kvUsers;
+          return kvUsers;
+        }
+      }
+    } catch (err) {
+      console.error('[D1] Erro ao carregar usuários:', err);
+    }
+  }
+
+  // Fallback para KV
   const { kv } = getKV(env);
   let kvUsers = null;
   if (kv) {
@@ -391,15 +531,11 @@ async function loadUsersList(env) {
     }
   }
 
-  // Mapa de usuários para mesclagem defensiva sem perda de perfis
   const map = new Map();
-
-  // 1. Incorpora usuários lidos do Cloudflare KV (leitura econômica kv.get)
   if (Array.isArray(kvUsers)) {
     kvUsers.forEach(u => { if (u && u.id) map.set(u.id, u); });
   }
 
-  // 2. Incorpora usuários da memória local deste worker (proteção contra replicação assíncrona do KV)
   if (Array.isArray(memoryFallbackUsers)) {
     memoryFallbackUsers.forEach(u => {
       if (u && u.id) {
@@ -423,6 +559,29 @@ async function loadUsersList(env) {
 }
 
 async function saveUsersList(env, list) {
+  const db = getD1(env);
+  if (db && Array.isArray(list)) {
+    try {
+      await ensureD1Tables(db);
+      for (const u of list) {
+        if (u && u.id) {
+          await db.prepare(
+            'INSERT OR REPLACE INTO users (id, name, created_at, last_saved_at, makitas, total_makitas_made) VALUES (?, ?, ?, ?, ?, ?)'
+          ).bind(
+            u.id,
+            u.name || 'Maker',
+            u.createdAt || Date.now(),
+            u.lastSavedAt || Date.now(),
+            Number(u.makitas) || 0,
+            Number(u.totalMakitasMade) || 0
+          ).run().catch(() => {});
+        }
+      }
+    } catch (err) {
+      console.error('[D1] Erro ao sincronizar usersList no D1:', err);
+    }
+  }
+
   const { kv } = getKV(env);
   if (kv) {
     try {
@@ -435,6 +594,43 @@ async function saveUsersList(env, list) {
 }
 
 async function loadUserState(env, userId) {
+  if (!userId) {
+    return { state: getDefaultState(), isNew: true, kvName: 'none', kvConnected: false, diag: 'Sem userId' };
+  }
+
+  const db = getD1(env);
+  if (db) {
+    try {
+      await ensureD1Tables(db);
+      const row = await db.prepare(
+        'SELECT state_json, save_rev, reset_epoch, updated_at FROM user_states WHERE user_id = ?'
+      ).bind(userId).first();
+
+      if (row && row.state_json) {
+        const parsed = expandUserState(JSON.parse(row.state_json));
+        parsed.saveRev = row.save_rev || parsed.saveRev || 0;
+        parsed.resetEpoch = row.reset_epoch || parsed.resetEpoch || 0;
+        advancePassiveProduction(parsed, Date.now());
+        return { state: parsed, kvName: 'D1', kvConnected: true, kvDiag: 'Carregado do Cloudflare D1' };
+      }
+
+      // Migração sob demanda do KV para D1:
+      const { kv } = getKV(env);
+      if (kv) {
+        const kvRaw = await kv.get(getUserStateKey(userId), { type: 'json' }).catch(() => null);
+        if (kvRaw) {
+          const parsed = expandUserState(kvRaw);
+          advancePassiveProduction(parsed, Date.now());
+          await saveUserState(env, userId, parsed);
+          return { state: parsed, kvName: 'KV->D1', kvConnected: true, kvDiag: 'Migrado do KV para o D1' };
+        }
+      }
+    } catch (e) {
+      console.error('[D1] Erro ao ler estado do usuário:', e);
+    }
+  }
+
+  // Fallback para KV
   const { kv, name, kvConnected, diag } = getKV(env);
   const key = getUserStateKey(userId);
   let kvState = null;
@@ -450,10 +646,6 @@ async function loadUserState(env, userId) {
   }
 
   const memState = memoryFallbackUserStates[userId];
-
-  // Blindagem contra consistência eventual do Cloudflare KV:
-  // Se o cache de memória deste worker tiver estado com resetEpoch mais recente,
-  // ou revisão/timestamp superior ao que o KV retornou, a memória PREVALECE.
   let state = kvState || memState || getDefaultState();
 
   if (kvState && memState) {
@@ -481,17 +673,46 @@ async function saveUserState(env, userId, state) {
     const memReset = currentMem.resetEpoch || 0;
     const stateReset = state.resetEpoch || 0;
     if (memReset > stateReset) {
-      // Rejeita sobrescrita de um reset recente por dados pré-reset
       return;
     }
   }
 
-  const { kv } = getKV(env);
-  const key = getUserStateKey(userId);
   const compact = compactUserState(state);
+  const stateJson = JSON.stringify(compact);
+  const saveRev = Number(state.saveRev) || 0;
+  const resetEpoch = Number(state.resetEpoch) || 0;
+  const now = Date.now();
+
+  const db = getD1(env);
+  if (db) {
+    try {
+      await ensureD1Tables(db);
+      await db.batch([
+        db.prepare(`
+          INSERT INTO user_states (user_id, state_json, save_rev, reset_epoch, updated_at)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(user_id) DO UPDATE SET
+            state_json = excluded.state_json,
+            save_rev = excluded.save_rev,
+            reset_epoch = excluded.reset_epoch,
+            updated_at = excluded.updated_at
+        `).bind(userId, stateJson, saveRev, resetEpoch, now),
+        db.prepare(`
+          UPDATE users
+          SET last_saved_at = ?, makitas = ?, total_makitas_made = ?
+          WHERE id = ?
+        `).bind(now, Number(state.makitas) || 0, Number(state.totalMakitasMade) || 0, userId)
+      ]);
+    } catch (e) {
+      console.error('[D1] Erro ao salvar estado:', e);
+    }
+  }
+
+  // Backup no KV
+  const { kv } = getKV(env);
   if (kv) {
     try {
-      await kv.put(key, JSON.stringify(compact));
+      await kv.put(getUserStateKey(userId), stateJson);
     } catch (err) {
       console.error(`[KV] Erro ao salvar estado do usuário ${userId}:`, err);
     }
@@ -500,14 +721,23 @@ async function saveUserState(env, userId, state) {
 }
 
 async function deleteUserState(env, userId) {
+  const db = getD1(env);
+  if (db) {
+    try {
+      await ensureD1Tables(db);
+      await db.batch([
+        db.prepare('DELETE FROM users WHERE id = ?').bind(userId),
+        db.prepare('DELETE FROM user_states WHERE user_id = ?').bind(userId)
+      ]);
+    } catch (e) {}
+  }
+
   const { kv } = getKV(env);
-  const key = getUserStateKey(userId);
   if (kv) {
     try {
-      await kv.delete(key);
-    } catch (err) {
-      console.error(`[KV] Erro ao deletar estado do usuário ${userId}:`, err);
-    }
+      await kv.delete(getUserStateKey(userId));
+      await kv.delete(`user_meta:${userId}`);
+    } catch (err) {}
   }
   delete memoryFallbackUserStates[userId];
 }
@@ -543,6 +773,52 @@ async function saveState(env, state) {
 }
 
 async function loadHardwareLease(env) {
+  const db = getD1(env);
+  const now = Date.now();
+
+  if (db) {
+    try {
+      await ensureD1Tables(db);
+      const row = await db.prepare(
+        'SELECT user_id, user_name, claimed_at, expires_at, lease_id FROM hardware_lease WHERE id = 1'
+      ).first();
+
+      if (row) {
+        const expiresAt = row.expires_at || 0;
+        const isUnexpired = expiresAt > now;
+        if (row.user_id && isUnexpired) {
+          const leaseObj = {
+            active: true,
+            userId: row.user_id,
+            userName: row.user_name || 'Maker',
+            claimedAt: row.claimed_at || 0,
+            expiresAt,
+            leaseId: row.lease_id || 0,
+            remainingSec: Math.max(0, Math.ceil((expiresAt - now) / 1000))
+          };
+          memoryFallbackHardwareLease = leaseObj;
+          return leaseObj;
+        } else {
+          const expiredObj = {
+            active: false,
+            userId: null,
+            userName: null,
+            claimedAt: row.claimed_at || 0,
+            releasedAt: row.expires_at || 0,
+            expiresAt: 0,
+            leaseId: row.lease_id || 0,
+            remainingSec: 0
+          };
+          memoryFallbackHardwareLease = expiredObj;
+          return expiredObj;
+        }
+      }
+    } catch (e) {
+      console.error('[D1] Erro ao ler hardware lease:', e);
+    }
+  }
+
+  // Fallback para KV
   const { kv } = getKV(env);
   let kvLease = null;
   if (kv) {
@@ -553,9 +829,6 @@ async function loadHardwareLease(env) {
     }
   }
 
-  // Reconciliação Temporal com Cache em Memória:
-  // Se o cache de memória possuir versão com timestamp superior (claimedAt ou releasedAt),
-  // ele prevalece para evitar regressões causadas por consistência eventual do Cloudflare KV.
   let lease = kvLease;
   if (memoryFallbackHardwareLease) {
     const memTimestamp = Math.max(memoryFallbackHardwareLease.claimedAt || 0, memoryFallbackHardwareLease.releasedAt || 0);
@@ -565,7 +838,6 @@ async function loadHardwareLease(env) {
     }
   }
 
-  const now = Date.now();
   if (lease && typeof lease === 'object') {
     const isUnexpired = lease.expiresAt && lease.expiresAt > now;
     if (lease.active !== false && lease.userId && isUnexpired) {
@@ -590,13 +862,35 @@ async function loadHardwareLease(env) {
 
 async function saveHardwareLease(env, lease) {
   const currentMem = memoryFallbackHardwareLease;
-  // Guarda sempre o lease com maior timestamp temporal
   if (currentMem && lease) {
     const curTime = Math.max(currentMem.claimedAt || 0, currentMem.releasedAt || 0);
     const newTime = Math.max(lease.claimedAt || 0, lease.releasedAt || 0);
-    if (curTime > newTime) {
-      // Tentativa de escrita com timestamp inferior: ignora para proteger contra eventual consistency
-      return;
+    if (curTime > newTime) return;
+  }
+
+  const db = getD1(env);
+  if (db) {
+    try {
+      await ensureD1Tables(db);
+      if (lease && lease.userId) {
+        await db.prepare(`
+          INSERT OR REPLACE INTO hardware_lease (id, user_id, user_name, claimed_at, expires_at, lease_id)
+          VALUES (1, ?, ?, ?, ?, ?)
+        `).bind(
+          lease.userId,
+          lease.userName || 'Maker',
+          lease.claimedAt || 0,
+          lease.expiresAt || 0,
+          lease.leaseId || 0
+        ).run();
+      } else {
+        await db.prepare(`
+          INSERT OR REPLACE INTO hardware_lease (id, user_id, user_name, claimed_at, expires_at, lease_id)
+          VALUES (1, NULL, NULL, 0, 0, 0)
+        `).run();
+      }
+    } catch (e) {
+      console.error('[D1] Erro ao salvar hardware lease:', e);
     }
   }
 
@@ -659,6 +953,8 @@ export async function onRequestGet(context) {
   const clientUserName = url.searchParams.get('clientUserName');
 
   const { kvName, kvConnected, diag } = getKV(env);
+  const db = getD1(env);
+  const storageType = (db && kvConnected) ? 'D1+KV (Dual-Engine)' : (db ? 'D1 (Primary)' : (kvConnected ? 'KV (Primary)' : 'Memory'));
   let usersList = await loadUsersList(env);
 
   // Auto-reconciliação defensiva: se o cliente possui um perfil local que não está em usersList
@@ -694,6 +990,8 @@ export async function onRequestGet(context) {
       users: usersList,
       topPlayer,
       hardwareOwner,
+      _storage: storageType,
+      _d1_connected: !!db,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE',
       _kv_diag: diag
@@ -713,6 +1011,8 @@ export async function onRequestGet(context) {
       ...state,
       topPlayer,
       hardwareOwner,
+      _storage: storageType,
+      _d1_connected: !!db,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE',
       _kv_diag: diag
@@ -728,6 +1028,8 @@ export async function onRequestGet(context) {
       success: true,
       hardwareOwner,
       topPlayer,
+      _storage: storageType,
+      _d1_connected: !!db,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE',
       _kv_diag: diag
@@ -848,6 +1150,8 @@ export async function onRequestPost(context) {
   }
 
   const { kvName, kvConnected, diag } = getKV(env);
+  const db = getD1(env);
+  const storageType = (db && kvConnected) ? 'D1+KV (Dual-Engine)' : (db ? 'D1 (Primary)' : (kvConnected ? 'KV (Primary)' : 'Memory'));
 
   let usersList = await loadUsersList(env);
   const clientUserId = body.userId || url.searchParams.get('clientUserId');
@@ -886,6 +1190,8 @@ export async function onRequestPost(context) {
       success: true,
       hardwareOwner,
       topPlayer,
+      _storage: storageType,
+      _d1_connected: !!db,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE',
       _kv_diag: diag
@@ -950,6 +1256,8 @@ export async function onRequestPost(context) {
       success: true,
       hardwareOwner: activeOwner,
       topPlayer,
+      _storage: storageType,
+      _d1_connected: !!db,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE',
       _kv_diag: diag
@@ -970,6 +1278,8 @@ export async function onRequestPost(context) {
       success: true,
       hardwareOwner: { active: false, userId: null, userName: null, expiresAt: 0, remainingSec: 0 },
       topPlayer,
+      _storage: storageType,
+      _d1_connected: !!db,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE',
       _kv_diag: diag
@@ -1010,6 +1320,8 @@ export async function onRequestPost(context) {
       state: initialState,
       topPlayer,
       hardwareOwner,
+      _storage: storageType,
+      _d1_connected: !!db,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE',
       _kv_diag: diag
@@ -1045,7 +1357,9 @@ export async function onRequestPost(context) {
         state: currentState,
         topPlayer,
         hardwareOwner,
-        _kv_connected: kvConnected,
+        _storage: storageType,
+      _d1_connected: !!db,
+      _kv_connected: kvConnected,
         _kv_binding: kvName || 'NONE',
         _kv_diag: 'Save defasado descartado pelo servidor para evitar ressurreição de dados.'
       }), {
@@ -1107,6 +1421,8 @@ export async function onRequestPost(context) {
       state: expanded,
       topPlayer,
       hardwareOwner,
+      _storage: storageType,
+      _d1_connected: !!db,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE',
       _kv_diag: diag
@@ -1152,6 +1468,8 @@ export async function onRequestPost(context) {
       state: freshState,
       topPlayer,
       hardwareOwner,
+      _storage: storageType,
+      _d1_connected: !!db,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE',
       _kv_diag: diag
@@ -1180,6 +1498,8 @@ export async function onRequestPost(context) {
       hardwareOwner,
       hardwareOrders: curState.hardwareOrders || [],
       queueLength: (curState.hardwareOrders ? curState.hardwareOrders.length : 0),
+      _storage: storageType,
+      _d1_connected: !!db,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE',
       _kv_diag: diag
@@ -1220,6 +1540,8 @@ export async function onRequestPost(context) {
       users: updatedUsers,
       topPlayer,
       hardwareOwner,
+      _storage: storageType,
+      _d1_connected: !!db,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE',
       _kv_diag: diag
@@ -1249,6 +1571,8 @@ export async function onRequestPost(context) {
       users: [],
       topPlayer,
       hardwareOwner,
+      _storage: storageType,
+      _d1_connected: !!db,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE',
       _kv_diag: diag
@@ -1312,6 +1636,8 @@ export async function onRequestPost(context) {
       topPlayer,
       hardwareOwner,
       resetOrder: true,
+      _storage: storageType,
+      _d1_connected: !!db,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE',
       _kv_diag: diag
@@ -1385,6 +1711,8 @@ export async function onRequestPost(context) {
       hardwareOrders: curState.hardwareOrders,
       lastResetExecutedAt: curState.lastResetExecutedAt,
       nextOrder: curState.hardwareOrders[0] || null,
+      _storage: storageType,
+      _d1_connected: !!db,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE'
     }), {
@@ -1440,6 +1768,8 @@ export async function onRequestPost(context) {
       pendingOrder: state.hardwareOrders[0],
       queueLength: state.hardwareOrders.length,
       hardwareOrders: state.hardwareOrders,
+      _storage: storageType,
+      _d1_connected: !!db,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE',
       _kv_diag: diag
@@ -1513,7 +1843,9 @@ export async function onRequestPost(context) {
         queueLength: state.hardwareOrders.length,
         topPlayer,
         hardwareOwner,
-        _kv_connected: kvConnected,
+        _storage: storageType,
+      _d1_connected: !!db,
+      _kv_connected: kvConnected,
         _kv_binding: kvName || 'NONE',
         _kv_diag: diag
       }), {
@@ -1571,7 +1903,9 @@ export async function onRequestPost(context) {
         hardwareOwner,
         lastResetExecutedAt: state.lastResetExecutedAt || 0,
         resetOrder: false,
-        _kv_connected: kvConnected,
+        _storage: storageType,
+      _d1_connected: !!db,
+      _kv_connected: kvConnected,
         _kv_binding: kvName || 'NONE',
         _kv_diag: diag
       }), {
