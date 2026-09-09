@@ -18,6 +18,7 @@ O projeto é um jogo incremental (Cookie Clicker) **híbrido** (Físico + Web).
 - **DOM Throttling:** Atualizações no DOM que não exigem taxa máxima (como atualizar listas de oficinas, textos descritivos) devem ser feitas via throttling (~6 FPS) para manter o uso de CPU mínimo.
 - **Sistema de Perfis de Usuário:** O jogo é individual por perfil (sem senha, focado em facilidade). O progresso local fica em `localStorage` sob a chave `makita_clicker_state_<userId>` e sincroniza na nuvem com Cloudflare KV a cada 3 minutos (auto-save) ou via botão manual ("Salvar na Nuvem").
 - **Proteção contra Perda de Progresso:** Um listener `beforeunload` avisa o jogador caso ele tente fechar o navegador com progresso local não salvo há mais de 5 minutos.
+- **Proteção Anti-AutoClicker (Ban de 5 min por IP):** O cliente detecta cliques sintéticos (`isTrusted=false`), CPS desumano (>28 CPS) e variância robótica com intervalo constante. Ao detectar, bloqueia a interface com modal de contagem regressiva e reporta ao backend, que suspende o IP na Cloudflare (`ban:ip:<clientIp>`, TTL 300s no KV) respondendo com HTTP 429 nas requisições. A placa física ESP8266 (`source: esp`) é imune ao ban de IP.
 
 ### Backend (Reconciliação, Perfis e Compactação no KV)
 - **Sincronismo Assíncrono:** O Frontend e a ESP enviam dados via POST para `/api/state`. 

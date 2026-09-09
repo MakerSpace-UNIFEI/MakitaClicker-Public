@@ -1050,7 +1050,144 @@ function playClickFeedback(gain) {
     spawnFlyingMakita();
 }
 
-makitaBtn.addEventListener('click', () => {
+// ---------- SISTEMA ANTI-AUTOCLICKER (BAN DE 5 MINUTOS) ----------
+const banModalEl = document.getElementById('banModal');
+const banCountdownTimerEl = document.getElementById('banCountdownTimer');
+const banReasonTextEl = document.getElementById('banReasonText');
+
+let banIntervalId = null;
+let clientBannedUntil = 0;
+
+// Detecção heurística de auto-clicker no cliente
+const clickTimestamps = [];
+const recentIntervals = [];
+let lastClickTime = 0;
+
+function formatBanTime(sec) {
+    const s = Math.max(0, Math.floor(sec || 0));
+    const m = Math.floor(s / 60);
+    const remS = s % 60;
+    return `${String(m).padStart(2, '0')}:${String(remS).padStart(2, '0')}`;
+}
+
+function isBanned() {
+    return clientBannedUntil > Date.now();
+}
+
+function triggerAutoClickerBan(reason = 'Uso de auto-clicker detectado') {
+    const BAN_DURATION_MS = 5 * 60 * 1000; // 5 minutos
+    clientBannedUntil = Date.now() + BAN_DURATION_MS;
+    try {
+        localStorage.setItem('makita_ban_until', String(clientBannedUntil));
+        localStorage.setItem('makita_ban_reason', reason);
+    } catch (e) {}
+
+    // Notifica o backend imediatamente para registrar o banimento do IP no Cloudflare KV
+    fetch('/api/state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            action: 'report_autoclicker',
+            reason: reason,
+            userId: currentUserId
+        })
+    }).catch(() => {});
+
+    showBanOverlay(clientBannedUntil, reason);
+}
+
+function showBanOverlay(untilMs, reason = 'Frequência anormal de cliques detectada') {
+    clientBannedUntil = untilMs;
+    if (banModalEl) banModalEl.style.display = 'flex';
+    if (banReasonTextEl) banReasonTextEl.textContent = `Motivo: ${reason}`;
+    if (makitaBtn) makitaBtn.disabled = true;
+
+    if (banIntervalId) clearInterval(banIntervalId);
+
+    const updateTimer = () => {
+        const remainingMs = clientBannedUntil - Date.now();
+        if (remainingMs <= 0) {
+            clearInterval(banIntervalId);
+            banIntervalId = null;
+            clientBannedUntil = 0;
+            try {
+                localStorage.removeItem('makita_ban_until');
+                localStorage.removeItem('makita_ban_reason');
+            } catch (e) {}
+            if (banModalEl) banModalEl.style.display = 'none';
+            if (makitaBtn) makitaBtn.disabled = false;
+            logEl.textContent = '✅ Banimento de 5 minutos expirado. Seja bem-vindo de volta!';
+            logEl.style.color = 'var(--green)';
+            return;
+        }
+        if (banCountdownTimerEl) {
+            banCountdownTimerEl.textContent = formatBanTime(remainingMs / 1000);
+        }
+    };
+
+    updateTimer();
+    banIntervalId = setInterval(updateTimer, 500);
+}
+
+function checkLocalBan() {
+    try {
+        const storedUntil = localStorage.getItem('makita_ban_until');
+        const storedReason = localStorage.getItem('makita_ban_reason') || 'Uso de auto-clicker detectado';
+        if (storedUntil) {
+            const until = Number(storedUntil);
+            if (until > Date.now()) {
+                showBanOverlay(until, storedReason);
+                return true;
+            } else {
+                localStorage.removeItem('makita_ban_until');
+                localStorage.removeItem('makita_ban_reason');
+            }
+        }
+    } catch (e) {}
+    return false;
+}
+
+makitaBtn.addEventListener('click', (e) => {
+    if (isBanned()) return;
+
+    const now = performance.now();
+
+    // 1. Detecção de cliques sintéticos de script (isTrusted === false)
+    if (e && e.isTrusted === false) {
+        triggerAutoClickerBan('Cliques sintéticos automatizados detectados (isTrusted=false)');
+        return;
+    }
+
+    // 2. Análise de CPS (janela deslizante de 1 segundo)
+    clickTimestamps.push(now);
+    while (clickTimestamps.length > 0 && clickTimestamps[0] < now - 1000) {
+        clickTimestamps.shift();
+    }
+
+    // Limite fisiológico humano: jitter/butterfly clicking raramente supera 24-26 CPS em um único botão
+    if (clickTimestamps.length > 28) {
+        triggerAutoClickerBan(`Velocidade desumana de cliques (${clickTimestamps.length} CPS)`);
+        return;
+    }
+
+    // 3. Detecção de robô com intervalo exato e constante (desvio padrão ~0)
+    if (lastClickTime > 0) {
+        const interval = now - lastClickTime;
+        recentIntervals.push(interval);
+        if (recentIntervals.length > 20) recentIntervals.shift();
+
+        if (recentIntervals.length >= 15) {
+            const avg = recentIntervals.reduce((a, b) => a + b, 0) / recentIntervals.length;
+            const variance = recentIntervals.reduce((a, b) => a + Math.pow(b - avg, 2), 0) / recentIntervals.length;
+            // Intervalo ultrarrápido (< 40ms, >25 CPS) com variação constante de robô (< 2ms)
+            if (avg < 40 && variance < 2.0) {
+                triggerAutoClickerBan('Padrão robótico com intervalo exato e constante detectado');
+                return;
+            }
+        }
+    }
+    lastClickTime = now;
+
     let gain = calculateLocalClickPower();
     const synergyPct = getClickSynergyPct();
     if (synergyPct > 0) {
@@ -1869,6 +2006,14 @@ function selectProfile(user) {
 async function fetchUserProfileState(userId) {
     try {
         const res = await fetch(`/api/state?userId=${encodeURIComponent(userId)}&_t=${Date.now()}`);
+        if (res.status === 429) {
+            const errData = await res.json().catch(() => ({}));
+            if (errData.banned) {
+                const untilMs = errData.banExpiresAt || (Date.now() + (errData.remainingSec || 300) * 1000);
+                showBanOverlay(untilMs, errData.reason || 'IP suspenso por 5 minutos');
+                return;
+            }
+        }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
 
@@ -1978,6 +2123,14 @@ async function saveUserProgressToCloud(isManual = false) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
         });
+        if (res.status === 429) {
+            const errData = await res.json().catch(() => ({}));
+            if (errData.banned) {
+                const untilMs = errData.banExpiresAt || (Date.now() + (errData.remainingSec || 300) * 1000);
+                showBanOverlay(untilMs, errData.reason || 'IP suspenso por 5 minutos');
+                return;
+            }
+        }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
 
@@ -2129,6 +2282,14 @@ async function syncWithCloud(actionPayload = null) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body)
         });
+        if (res.status === 429) {
+            const errData = await res.json().catch(() => ({}));
+            if (errData.banned) {
+                const untilMs = errData.banExpiresAt || (Date.now() + (errData.remainingSec || 300) * 1000);
+                showBanOverlay(untilMs, errData.reason || 'IP suspenso por 5 minutos');
+                return;
+            }
+        }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
         measuredPingMs = Math.round(performance.now() - pingStart);
@@ -2202,6 +2363,8 @@ function gameLoop(now) {
 
 // ---------- INICIALIZAÇÃO DO JOGO ----------
 function initGame() {
+    checkLocalBan();
+
     currentUserId = localStorage.getItem('makita_active_user_id') || null;
     currentUserName = localStorage.getItem('makita_active_user_name') || null;
     const storedCreatedAt = localStorage.getItem('makita_active_user_created_at');

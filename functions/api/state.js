@@ -38,6 +38,75 @@ let memoryFallbackUsers = [];
 let memoryFallbackUserStates = {};
 let memoryFallbackHardwareLease = null;
 
+// Sistema Anti-AutoClicker (Ban de 5 minutos por IP no Cloudflare KV e em memória)
+const BAN_DURATION_MS = 5 * 60 * 1000; // 5 minutos
+const memoryBannedIps = new Map(); // IP -> { bannedAt, expiresAt, reason, ip }
+const memoryIpClickTracking = new Map(); // IP -> { windowStart, totalClicks, requestCount }
+
+function getClientIp(request) {
+  const cfIp = request.headers.get('CF-Connecting-IP');
+  if (cfIp) return cfIp.trim();
+  const xRealIp = request.headers.get('x-real-ip');
+  if (xRealIp) return xRealIp.trim();
+  const xForwardedFor = request.headers.get('x-forwarded-for');
+  if (xForwardedFor) return xForwardedFor.split(',')[0].trim();
+  return 'unknown';
+}
+
+async function checkIpBan(env, ip) {
+  if (!ip || ip === 'unknown' || ip === '127.0.0.1' || ip === '::1') {
+    return { banned: false };
+  }
+
+  const now = Date.now();
+
+  // 1. Checagem ultra-rápida no cache em memória
+  const memBan = memoryBannedIps.get(ip);
+  if (memBan) {
+    if (now < memBan.expiresAt) {
+      const remainingSec = Math.ceil((memBan.expiresAt - now) / 1000);
+      return { banned: true, remainingSec, banExpiresAt: memBan.expiresAt, reason: memBan.reason };
+    } else {
+      memoryBannedIps.delete(ip);
+    }
+  }
+
+  // 2. Checagem no Cloudflare KV
+  const { kv } = getKV(env);
+  if (kv) {
+    try {
+      const kvBan = await kv.get(`ban:ip:${ip}`, { type: 'json' });
+      if (kvBan && kvBan.expiresAt > now) {
+        memoryBannedIps.set(ip, kvBan);
+        const remainingSec = Math.ceil((kvBan.expiresAt - now) / 1000);
+        return { banned: true, remainingSec, banExpiresAt: kvBan.expiresAt, reason: kvBan.reason };
+      }
+    } catch (e) {}
+  }
+
+  return { banned: false };
+}
+
+async function applyIpBan(env, ip, reason = 'Uso de auto-clicker detectado') {
+  if (!ip || ip === 'unknown' || ip === '127.0.0.1' || ip === '::1') return;
+  const now = Date.now();
+  const expiresAt = now + BAN_DURATION_MS;
+  const banData = { bannedAt: now, expiresAt, reason, ip };
+
+  memoryBannedIps.set(ip, banData);
+
+  const { kv } = getKV(env);
+  if (kv) {
+    try {
+      await kv.put(`ban:ip:${ip}`, JSON.stringify(banData), {
+        expirationTtl: 300 // 5 minutos (300 segundos) de expiração automática no KV
+      });
+    } catch (e) {
+      console.error(`[ANTI-CLICKER] Erro ao gravar banimento do IP ${ip} no KV:`, e);
+    }
+  }
+}
+
 function getDefaultState() {
   const owned = {};
   UPGRADES.forEach(u => { owned[u.id] = 0; });
@@ -540,6 +609,26 @@ export async function onRequestOptions() {
 
 export async function onRequestGet(context) {
   const { request, env } = context;
+
+  // Verificação Anti-AutoClicker por IP (Ban de 5 minutos)
+  const clientIp = getClientIp(request);
+  const banStatus = await checkIpBan(env, clientIp);
+  if (banStatus.banned) {
+    return new Response(JSON.stringify({
+      error: 'Seu IP está temporariamente suspenso por 5 minutos devido a uso de auto-clicker.',
+      banned: true,
+      remainingSec: banStatus.remainingSec,
+      banExpiresAt: banStatus.banExpiresAt,
+      reason: banStatus.reason
+    }), {
+      status: 429,
+      headers: {
+        ...CORS_HEADERS,
+        'Retry-After': String(banStatus.remainingSec)
+      }
+    });
+  }
+
   const url = new URL(request.url);
   const action = url.searchParams.get('action');
   const userId = url.searchParams.get('userId');
@@ -634,6 +723,80 @@ export async function onRequestPost(context) {
   const url = new URL(request.url);
   const action = body.action || url.searchParams.get('action') || (body.clicks ? 'sync' : '');
   const isEsp = body.source === 'esp';
+  const clientIp = getClientIp(request);
+
+  // Verificação Anti-AutoClicker por IP (a ESP8266 física nunca é bloqueada por IP)
+  if (!isEsp) {
+    const banStatus = await checkIpBan(env, clientIp);
+    if (banStatus.banned) {
+      return new Response(JSON.stringify({
+        error: 'Seu IP está temporariamente suspenso por 5 minutos devido a uso de auto-clicker.',
+        banned: true,
+        remainingSec: banStatus.remainingSec,
+        banExpiresAt: banStatus.banExpiresAt,
+        reason: banStatus.reason
+      }), {
+        status: 429,
+        headers: {
+          ...CORS_HEADERS,
+          'Retry-After': String(banStatus.remainingSec)
+        }
+      });
+    }
+
+    // Ação explícita de reporte enviada pelo cliente (detecção de cliques sintéticos ou CPS > 28)
+    if (action === 'report_autoclicker') {
+      const reason = String(body.reason || 'Auto-clicker reportado pelo cliente').slice(0, 120);
+      await applyIpBan(env, clientIp, reason);
+      return new Response(JSON.stringify({
+        success: true,
+        banned: true,
+        remainingSec: 300,
+        banExpiresAt: Date.now() + BAN_DURATION_MS,
+        reason
+      }), {
+        status: 429,
+        headers: {
+          ...CORS_HEADERS,
+          'Retry-After': '300'
+        }
+      });
+    }
+
+    // Monitoramento no backend de taxa anormal de cliques / requests (Web)
+    const nowMs = Date.now();
+    let tracking = memoryIpClickTracking.get(clientIp);
+    if (!tracking || nowMs - tracking.windowStart > 10000) {
+      tracking = { windowStart: nowMs, totalClicks: 0, requestCount: 0 };
+      memoryIpClickTracking.set(clientIp, tracking);
+    }
+    tracking.requestCount++;
+    const incomingClicks = typeof body.clicks === 'number' ? body.clicks : 0;
+    tracking.totalClicks += incomingClicks;
+
+    // Se um único payload web vier com mais de 500 cliques ou se em 10s tiver mais de 350 cliques (>35 CPS)
+    // ou mais de 50 requisições em 10s:
+    if (incomingClicks > 500 || tracking.totalClicks > 350 || tracking.requestCount > 50) {
+      const reason = incomingClicks > 500
+        ? `Taxa desumana de cliques em lote único (${incomingClicks} cliques)`
+        : `Taxa anormal de cliques/requisições (${tracking.totalClicks} cliques em 10s)`;
+      await applyIpBan(env, clientIp, reason);
+      return new Response(JSON.stringify({
+        error: 'Seu IP foi banido por 5 minutos por uso de auto-clicker.',
+        banned: true,
+        remainingSec: 300,
+        banExpiresAt: nowMs + BAN_DURATION_MS,
+        reason
+      }), {
+        status: 429,
+        headers: {
+          ...CORS_HEADERS,
+          'Retry-After': '300'
+        }
+      });
+    }
+  }
+
   const { kvName, kvConnected, diag } = getKV(env);
 
   const usersList = await loadUsersList(env);

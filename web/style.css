@@ -1411,3 +1411,99 @@ button:focus-visible {
     background: #ffaa6b;
     box-shadow: 0 0 12px rgba(255, 143, 67, 0.4);
 }
+
+/* ===== Anti-AutoClicker Modal ===== */
+.ban-overlay {
+    z-index: 99999 !important;
+    background: rgba(10, 5, 5, 0.94) !important;
+    backdrop-filter: blur(8px);
+}
+
+.ban-dialog {
+    border: 2px solid #ef4444 !important;
+    box-shadow: 0 0 35px rgba(239, 68, 68, 0.45) !important;
+    max-width: 480px !important;
+    animation: banPulse 2s infinite ease-in-out;
+}
+
+@keyframes banPulse {
+    0%, 100% {
+        box-shadow: 0 0 25px rgba(239, 68, 68, 0.4);
+    }
+    50% {
+        box-shadow: 0 0 45px rgba(239, 68, 68, 0.7);
+    }
+}
+
+.ban-header {
+    border-bottom: 1px solid rgba(239, 68, 68, 0.3) !important;
+    text-align: center;
+}
+
+.ban-title {
+    color: #ef4444 !important;
+    font-size: 1.15rem !important;
+    letter-spacing: 0.05em;
+}
+
+.ban-subtitle {
+    color: var(--text-lo);
+    font-size: 0.82rem;
+    margin-top: 0.3rem;
+}
+
+.ban-body {
+    text-align: center;
+    padding: 1.5rem 1rem !important;
+}
+
+.ban-icon {
+    font-size: 3.2rem;
+    margin-bottom: 0.8rem;
+    animation: bounce 1s infinite alternate ease-in-out;
+}
+
+@keyframes bounce {
+    from { transform: translateY(0); }
+    to { transform: translateY(-6px); }
+}
+
+.ban-countdown-box {
+    background: rgba(239, 68, 68, 0.12);
+    border: 1px solid rgba(239, 68, 68, 0.35);
+    border-radius: 8px;
+    padding: 1rem;
+    margin: 1rem 0;
+}
+
+.ban-countdown-label {
+    display: block;
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: #f87171;
+    letter-spacing: 0.08em;
+    margin-bottom: 0.4rem;
+}
+
+.ban-countdown-timer {
+    font-size: 2.5rem;
+    font-weight: 900;
+    font-family: var(--mono);
+    color: #ef4444;
+    letter-spacing: 0.08em;
+    text-shadow: 0 0 15px rgba(239, 68, 68, 0.6);
+}
+
+.ban-reason {
+    font-size: 0.88rem;
+    font-weight: 600;
+    color: var(--text-hi);
+    margin: 0.8rem 0 0.5rem;
+}
+
+.ban-info {
+    font-size: 0.75rem;
+    color: var(--text-lo);
+    line-height: 1.4;
+    margin-top: 0.5rem;
+}

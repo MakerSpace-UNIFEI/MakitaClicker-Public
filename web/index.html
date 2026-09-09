@@ -320,6 +320,28 @@
     </div>
 </div>
 
+<!-- Modal Anti-AutoClicker (Bloqueio de 5 minutos por IP) -->
+<div class="modal-overlay ban-overlay" id="banModal" style="display: none;">
+    <div class="modal-dialog ban-dialog">
+        <div class="modal-header ban-header">
+            <h2 class="modal-title ban-title">🚨 PROTEÇÃO ANTI-AUTOCLICKER</h2>
+            <p class="modal-subtitle ban-subtitle">Uso de macro, script ou velocidade desumana de cliques detectado!</p>
+        </div>
+        <div class="modal-section ban-body">
+            <div class="ban-icon">⛔</div>
+            <div class="ban-countdown-box">
+                <span class="ban-countdown-label">SEU IP FOI SUSPENSO POR:</span>
+                <div class="ban-countdown-timer" id="banCountdownTimer">05:00</div>
+            </div>
+            <p class="ban-reason" id="banReasonText">Frequência anormal de cliques detectada.</p>
+            <p class="ban-info">
+                Por questões de justiça no ranking com os jogadores físicos e online,
+                seu IP e dispositivo estão impedidos de clicar ou sincronizar durante este período.
+            </p>
+        </div>
+    </div>
+</div>
+
 <script type="module" src="/game.js"></script>
 </body>
 </html>
