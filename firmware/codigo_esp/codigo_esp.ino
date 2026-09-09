@@ -507,6 +507,8 @@ void saveLocalGameState() {
 }
 
 // Controle de Reset Remoto da ESP
+// Cache de Sessão TLS BearSSL: acelera handshakes subsequentes de ~2000ms para ~30ms (elimina travamentos)
+static BearSSL::Session sslSession;
 bool hasPendingResetAck = false;
 bool forceCloudSync = false;
 
@@ -518,17 +520,22 @@ void syncWithCloud() {
     return;
   }
 
-  statusAtual = "Sincroniz.";
-  precisaAtualizarLCD = true;
-  atualizarLCD();
+  // Drena e processa atomicamente cliques da ISR imediatamente antes de montar o pacote
+  if (isrPendingClicks > 0) {
+    noInterrupts();
+    uint32_t c = isrPendingClicks;
+    isrPendingClicks = 0;
+    interrupts();
+    handleClicks(c);
+  }
 
   WiFiClientSecure client;
   client.setInsecure();
-  // Alocação consciente de buffers BearSSL: economiza ~15 KB de Heap na SRAM
-  client.setBufferSizes(2048, 512);
+  client.setBufferSizes(1024, 512); // Buffer reduzido para economizar RAM e acelerar alocação
+  client.setSession(&sslSession);    // <--- TLS Session Resumption! Handshake abreviado (~30ms)
 
   HTTPClient http;
-  http.setTimeout(2500); // Timeout estrito de 2.5s para evitar travamento da CPU
+  http.setTimeout(1800); // Timeout reduzido para evitar travamento em caso de perda de pacote
   http.begin(client, STATE_URL);
   http.addHeader("Content-Type", "application/json");
 
@@ -557,6 +564,16 @@ void syncWithCloud() {
   serializeJson(reqDoc, reqBody);
 
   int httpCode = http.POST(reqBody);
+
+  // Processa imediatamente qualquer clique que tenha ocorrido durante os milissegundos de rede
+  if (isrPendingClicks > 0) {
+    noInterrupts();
+    uint32_t c = isrPendingClicks;
+    isrPendingClicks = 0;
+    interrupts();
+    handleClicks(c);
+    precisaAtualizarLCD = true;
+  }
 
   if (httpCode == HTTP_CODE_OK) {
     String responsePayload = http.getString();
@@ -889,9 +906,10 @@ bool enviarAckOrdem(const char* orderId) {
   WiFiClientSecure client;
   client.setInsecure();
   client.setBufferSizes(1024, 512);
+  client.setSession(&sslSession);
 
   HTTPClient http;
-  http.setTimeout(4000);
+  http.setTimeout(2000);
   http.begin(client, STATE_URL);
   http.addHeader("Content-Type", "application/json");
 
@@ -1163,8 +1181,9 @@ void setup() {
 unsigned long lastTick = 0;
 unsigned long lastCloudSync = 0;
 unsigned long lastLocalSave = 0;
-const unsigned long CLOUD_SYNC_INTERVAL_MS = 3000;  // Sincronização a cada 3 segundos (alta responsividade)
-const unsigned long LOCAL_SAVE_INTERVAL_MS = 30000; // Autosave condicional na flash a cada 30 segundos
+const unsigned long CLOUD_SYNC_INTERVAL_ACTIVE_MS = 2500; // 2.5s se houver cliques físicos pendentes
+const unsigned long CLOUD_SYNC_INTERVAL_IDLE_MS   = 8000; // 8s quando ocioso (poupa CPU, elimina engasgos e mantém o display fluido)
+const unsigned long LOCAL_SAVE_INTERVAL_MS = 30000;       // Autosave condicional na flash a cada 30 segundos
 
 void gerenciarWiFi() {
   unsigned long now = millis();
@@ -1265,8 +1284,11 @@ void loop() {
     isFlashDirty = false;
   }
 
-  // 6. Sincronização periódica com a Nuvem a cada 5 segundos ou imediata após Reset
-  if (forceCloudSync || (now - lastCloudSync >= CLOUD_SYNC_INTERVAL_MS)) {
+  // 6. Sincronização inteligente com a Nuvem:
+  // - Se houver cliques físicos pendentes: cadência rápida (2.5s) para enviar os pontos
+  // - Se estiver ocioso (sem cliques): cadência suave (8s) para manter ranking/posse sem travar a CPU
+  unsigned long syncInterval = (pendingPhysicalClicks > 0) ? CLOUD_SYNC_INTERVAL_ACTIVE_MS : CLOUD_SYNC_INTERVAL_IDLE_MS;
+  if (forceCloudSync || (now - lastCloudSync >= syncInterval)) {
     forceCloudSync = false;
     lastCloudSync = now;
     if (WiFi.status() == WL_CONNECTED) {
