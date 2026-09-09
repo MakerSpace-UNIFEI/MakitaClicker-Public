@@ -1,0 +1,42 @@
+# =====================================================================
+# MAKITA CLICKER — CLOUDFLARE PAGES CUSTOM HEADERS (_headers)
+# Elimina 100% o cache defasado no navegador para HTML e Manifestos
+# =====================================================================
+
+# 1. Pagina inicial e arquivos HTML: NUNCA armazenar em cache (sempre buscar versao nova)
+/
+  Cache-Control: no-cache, no-store, must-revalidate, proxy-revalidate, max-age=0
+  Pragma: no-cache
+  Expires: 0
+
+/index.html
+  Cache-Control: no-cache, no-store, must-revalidate, proxy-revalidate, max-age=0
+  Pragma: no-cache
+  Expires: 0
+
+/admin.html
+  Cache-Control: no-cache, no-store, must-revalidate, proxy-revalidate, max-age=0
+  Pragma: no-cache
+  Expires: 0
+
+# 2. Configuracoes e Manifestos JSON
+/game-config.json
+  Cache-Control: no-cache, no-store, must-revalidate, proxy-revalidate, max-age=0
+  Pragma: no-cache
+  Expires: 0
+
+/version.json
+  Cache-Control: no-cache, no-store, must-revalidate, proxy-revalidate, max-age=0
+  Pragma: no-cache
+  Expires: 0
+
+# 3. Endpoints da API Serverless
+/api/*
+  Cache-Control: no-cache, no-store, must-revalidate, proxy-revalidate, max-age=0
+  Pragma: no-cache
+  Expires: 0
+
+# 4. Assets estaticos versionados com HASH unico no nome (ex: main-UwrN2t5A.js)
+# Como o hash do arquivo muda a cada compilacao, estes podem ser cacheados com seguranca
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable

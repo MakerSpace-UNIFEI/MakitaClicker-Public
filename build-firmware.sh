@@ -71,12 +71,15 @@ echo "Tamanho: $SIZE bytes"
 echo "MD5:     $MD5"
 
 # 9. Geração do manifesto version.json com validação criptográfica
+BUILD_TIME_MS=$(date +%s%3N 2>/dev/null || date +%s)
 cat > ./dist/version.json << VERSIONJSON
 {
   "firmware_version": $VERSION,
   "firmware_url": "https://makitaclicker.pages.dev/firmware.bin",
   "firmware_size": $SIZE,
-  "firmware_md5": "$MD5"
+  "firmware_md5": "$MD5",
+  "web_version": $VERSION,
+  "build_time": $BUILD_TIME_MS
 }
 VERSIONJSON
 

@@ -1404,16 +1404,29 @@ function applyServerState(data) {
 
 // ---------- TELEMETRIA E STATUS DA ESP8266 & CLOUD ----------
 let remoteFirmwareVersion = null;
+let currentAppBuildTime = null;
 let measuredPingMs = null;
 let latestServerData = null;
 
 async function fetchRemoteVersion() {
     try {
-        const res = await fetch('/version.json?t=' + Date.now());
+        const res = await fetch('/version.json?t=' + Date.now(), { cache: 'no-store' });
         if (res.ok) {
             const data = await res.json();
             if (typeof data.firmware_version === 'number') {
                 remoteFirmwareVersion = data.firmware_version;
+            }
+            if (typeof data.build_time === 'number') {
+                if (currentAppBuildTime === null) {
+                    currentAppBuildTime = data.build_time;
+                } else if (data.build_time > currentAppBuildTime) {
+                    console.log(`[VERSION] Nova versão detectada na nuvem (${data.build_time} > ${currentAppBuildTime}). Atualizando...`);
+                    showFloatText('🚀 Nova versão do jogo! Atualizando...');
+                    setTimeout(() => {
+                        window.location.reload(true);
+                    }, 1200);
+                    return;
+                }
             }
         }
     } catch (e) {

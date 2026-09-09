@@ -1,5 +1,6 @@
 import { resolve } from 'path';
 import { readFileSync, copyFileSync } from 'fs';
+import { execSync } from 'child_process';
 import { defineConfig } from 'vite';
 
 function gameConfigPlugin() {
@@ -23,6 +24,20 @@ function gameConfigPlugin() {
         type: 'asset',
         fileName: 'game-config.json',
         source: content
+      });
+
+      let rev = Date.now();
+      try {
+        rev = parseInt(execSync('git rev-list --count HEAD', { cwd: import.meta.dirname, stdio: ['pipe', 'pipe', 'ignore'] }).toString().trim(), 10) || rev;
+      } catch (e) {}
+
+      this.emitFile({
+        type: 'asset',
+        fileName: 'version.json',
+        source: JSON.stringify({
+          web_version: rev,
+          build_time: Date.now()
+        }, null, 2)
       });
     },
     configureServer(server) {
