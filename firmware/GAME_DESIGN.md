@@ -6,25 +6,19 @@
 
 ## 1. ⚙️ Visão Geral do Sistema
 
-O **MakitaClicker** é um jogo híbrido físico/digital. O hardware do **ESP8266** atua como o servidor autoritativo da partida (saldo de Makitas até 99B+, produção passiva, compras de upgrades, árvore de habilidades e persistência em flash), enquanto a **Interface Web** e o **Arduino Mega** são clientes de interação em tempo real.
+O **MakitaClicker** é um jogo incremental híbrido físico/digital. A arquitetura atual é 100% autônoma no microcontrolador **ESP8266 NodeMCU**, sem necessidade de placas secundárias. O estado de jogo e a telemetria sincronizam com a nuvem na infraestrutura **Cloudflare Pages (Dual-Engine D1 SQL + Cloudflare KV)**, conectando o console físico do laboratório à **Interface Web**.
 
 ```
-┌─────────────────┐   Serial0 38400 (115200 OTA)  ┌─────────────────────────┐
-│  Arduino Mega   │ ◄───────────────────────────► │         ESP8266         │
-│ (Botão 7 + LCD) │    CLICK / MAKITA:S,M,C,O     │ (Servidor Autoritativo) │
-└─────────────────┘    (STK500v2 OTA no Boot)     └────────────┬────────────┘
-                                                               │ WebSocket :81
-                                                               │ (HTTP :80 LittleFS)
-                                                               ▼
-                                                  ┌─────────────────────────┐
-                                                  │   Interface Web (JS)    │
-                                                  │   - Clicker & Efeitos   │
-                                                  │   - 24 Oficinas (Loja)  │
-                                                  │   - 20 Tecnologias      │
-                                                  │   - Meta 99B & Stats    │
-                                                  │   - Persistência Flash  │
-                                                  │   - Botão Reset Total   │
-                                                  └─────────────────────────┘
+    ┌──────────────────────┐    ┌────────────────────────────────────────┐    ┌──────────────────────┐
+    │     Navegador        │    │      Cloudflare Edge Serverless        │    │  ESP8266 NodeMCU     │
+    │  (Desktop / Mobile)  │◀──▶│        makitaclicker.pages.dev         │◀──▶│  (Hardware Físico)   │
+    │                      │    │   - Cloudflare D1 (SQL Primário)       │    │                      │
+    │ - Taxa Nativa (dt)   │    │   - Cloudflare KV (Cache Rápido)       │    │ - Display LCD 20x4   │
+    │ - Perfis & Auto-Sync │    │   - Desduplicação de Nomes             │    │ - Dono / Top no LCD  │
+    │ - Loja de Oficinas   │    │   - Reconciliação & Top Player         │    │ - Botão Físico (D5)  │
+    │ - Tomar ESP (Lease)  │    │   - Hardware Lease (Posse Exclusiva)   │    │ - Flash LittleFS     │
+    │ - Proteção Anti-Bot  │    │   - Auto-Update OTA (/version.json)    │    │ - Auto-Update OTA    │
+    └──────────────────────┘    └────────────────────────────────────────┘    └──────────────────────┘
 ```
 
 ---
@@ -107,40 +101,45 @@ As melhorias permanentes fornecem **multiplicadores e bônus diretos** tanto na 
 ## 4. 💾 Persistência de Dados e Reset
 
 - **Arquivo no LittleFS:** `/gamestate.json`
-- **Autosave:** O estado completo da partida (saldo de Makitas em double, 24 upgrades e 20 flags permanentes) é gravado automaticamente a cada **5 segundos** e imediatamente após compras.
-- **Espelhamento EEPROM:** Bitmask de 32 bits com checksum XOR e magic number `0x4D4B5433` ("MKT3") restaurado automaticamente em caso de indisponibilidade da flash.
+- **Wear-Leveling Shield:** A gravação na flash ocorre a cada **30 segundos**, mas **apenas se houver alterações reais pendentes** (`isFlashDirty == true`). Evita gravações redundantes, reduzindo o desgaste da flash em mais de 90%.
 - **Carregamento Automático:** No boot, o ESP executa `loadGameState()` e restaura a partida exatamente de onde parou.
-- **Comando de Reset Total:** Via WebSocket (`RESET`), apaga `/gamestate.json`, zera a EEPROM e a RAM, e transmite o estado limpo para o display LCD e navegadores.
+- **Handshake de Reset Bidirecional (Zero-Recursion):**
+  1. Nuvem envia `resetOrder: true`.
+  2. ESP8266 zera a RAM, formata `/gamestate.json` no LittleFS e exibe `Status: Reset OK!`.
+  3. No próximo ciclo de loop, a ESP transmite de forma não-bloqueante a confirmação `resetAck: true`.
+  4. Nuvem limpa a pendência `resetPendingEsp = false`.
 
 ---
 
-## 5. 📡 Protocolo de Comunicação em Tempo Real
+## 5. 📡 Protocolo de Comunicação HTTPS REST
 
-### WebSocket (Porta 81) — Cliente ➔ ESP:
-- `CLICK`: Registra clique manual.
-- `BUY:<upgradeId>:<qty|max>`: Solicita compra de lote da oficina.
-- `PERM_BUY:<permId>:<cost>`: Compra e ativa melhoria permanente na árvore.
-- `RESET`: Reinicia completamente o progresso do jogo.
+A ESP8266 comunica-se diretamente com a Cloudflare através do endpoint `/api/state`:
 
-### Serial UART0 (38400 baud) — ESP ➔ Arduino Mega:
-- Formato: `MAKITA:<saldo_float>,<mps_float>,<clickPower_float>,<totalOwned_int>\n`
-- Exemplo: `MAKITA:99000000000.0,15000000.0,2500.0,240`
-
-### Serial UART0 (38400 baud) — Arduino Mega ➔ ESP:
-- Formato: `CLICK\n` (Acionado pelo botão no pino 7 com debounce de 35ms).
+### Sincronização Periódica (`sync`):
+- **Cadência Dinâmica:** A cada **2.0 segundos** quando o botão físico estiver sendo acionado, ou a cada **3.5 segundos** em repouso.
+- **Buffers TLS BearSSL:** `2560` bytes (RX) e `768` bytes (TX) com timeout de `2500ms`.
+- **Payload Enviado:** Cliques pendentes, makitas, versão de firmware, IP local, RSSI Wi-Fi, uptime e RAM livre.
+- **Resposta da Nuvem:** JSON compacto (< 700 bytes) contendo estado mestre, dono do hardware (`hardwareController`) e `topPlayer`.
 
 ---
 
-## 6. 📺 Display LCD I2C 20×4 no Arduino Mega
+## 6. 📺 Display LCD I2C 20×4 na NodeMCU
 
-- **Linha 0:** Cabeçalho animado com lâminas giratórias (`MAKITA CLICKER`) ou faíscas em clique.
-- **Linha 1:** Saldo formatado (`[Coin] Saldo: 99.0B MKT` ou `[Trophy] Saldo: 99.0B MKT!`).
-- **Linha 2:** Poder de corte e taxa de produção compactados (`[Bolt]+2.5k | [Factory] 15.0M/s`).
-- **Linha 3:** Feedback instantâneo (`>> CORTE EFETUADO! <<`) ou carrossel rotativo:
-  - `Site: makitaclicker.pages.dev`
-  - `Top: <nome> (<saldo>)` (Líder global recebido do backend)
-  - `Oficinas: X un.`
-  - `Meta 99B: XX.X%` (ou `** META 99B FEITA! **`)
-  - `FW: vXX (OTA Ativo)`
-  - `IP: 192.168.x.x`
-  - `MakerSpace UNIFEI`
+O display é acionado diretamente pela ESP8266 no barramento I2C a **400 kHz** com double-buffering estático (`char[21]`) e sanitização ASCII:
+
+- **Linha 0 (Dono / Top Player):**
+  - Se a ESP foi tomada via Web: `Dono: <Nome> (MM:SS)` com contagem regressiva de até 3 minutos.
+  - Se estiver livre: `1o: <Nome> (<Saldo>)` com o líder geral do ranking.
+  - Caracteres incompatíveis (como acentos, `ç`, `º`) são sanitizados para ASCII simples legível.
+- **Linha 1 (Saldo Atual):**
+  - `Makitas: 125.4k MKT` (ou `Makitas: 99B (META!)` ao bater o objetivo).
+- **Linha 2 (Produção / Corte):**
+  - `Prod: +15.0/s   (+1)`
+  - Alterna instantaneamente para `>> CORTE EFETUADO! <<` por 600 ms ao pressionar o botão físico D5.
+- **Linha 3 (Status Operacional ao Vivo):**
+  - `Status: Ativo` (Wi-Fi e nuvem sincronizados)
+  - `Status: Conectando` (Negociando Wi-Fi)
+  - `Status: Offline` (Modo autônomo local sem rede)
+  - `Status: Sincroniz.` (Trocando pacotes HTTPS)
+  - `Status: Apagando...` / `Status: Reset OK!` (Executando reset)
+  - `>> GRAVANDO: XX% <<` (Barra de progresso durante atualização OTA)

@@ -13,9 +13,9 @@
 O **MakitaClicker** é um jogo incremental (*cookie clicker*) híbrido físico-digital. O objetivo do jogo é acumular "Makitas" até atingir a grande meta cósmica de **99 Bilhões (99B)**. 
 
 O diferencial do projeto é sua integração completa entre hardware e web:
-1. **Console Físico Autônomo:** Um microcontrolador **ESP8266 NodeMCU** com botão mecânico industrial de alta durabilidade e um display **LCD 20×4 I2C**. Funciona com latência de clique de 0ms, salva o progresso na memória flash interna (**LittleFS**), sincroniza pela internet via Wi-Fi e exibe em tempo real o **Top Player** (jogador líder global) no display.
-2. **Interface Web Moderna & Sistema de Perfis:** Roda em qualquer navegador (desktop ou mobile) na taxa de atualização nativa do monitor com cálculo via `dt`, perfis de usuário individuais instantâneos (sem senha), persistência local por perfil, auto-save a cada 3 minutos, botão manual de salvamento na nuvem, loja de oficinas, árvore tecnológica (*Skill Tree*) e telemetria de hardware.
-3. **Backend Serverless (Cloudflare Pages & KV):** Banco de dados em Cloudflare KV com serialização compacta (arrays indexados para oficinas e habilidades), listagem de usuários (`users:list`), estado individual (`user:<id>:state`) e cálculo de liderança para o display do console físico.
+1. **Console Físico Autônomo:** Um microcontrolador **ESP8266 NodeMCU** com botão mecânico industrial de alta durabilidade e um display **LCD 20×4 I2C**. Funciona com latência de clique de 0ms, salva o progresso na memória flash interna (**LittleFS**), sincroniza pela internet via Wi-Fi e exibe em tempo real o **Top Player** ou o **Dono Temporário** no display com suporte a posse exclusiva via Web.
+2. **Interface Web Moderna & Sistema de Perfis:** Roda em qualquer navegador (desktop ou mobile) na taxa de atualização nativa do monitor com cálculo via `dt`, perfis de usuário individuais instantâneos (sem senha), desduplicação automática de apelidos (`Nome`, `Nome 2`...), upload e recuperação transparente de perfis locais, auto-save a cada 3 minutos, botão manual de salvamento na nuvem, loja de oficinas, árvore tecnológica (*Skill Tree*) e telemetria de hardware.
+3. **Backend Serverless Dual-Engine (Cloudflare D1 + KV):** Banco de dados relacional SQL no Cloudflare D1 como camada primária autoritativa (`100.000 gravações/dia` gratuitas nas tabelas `users`, `user_states`, `hardware_lease`, `ip_bans`) pareado com o Cloudflare KV para cache e redundância rápida.
 4. **CI/CD e Firmware OTA Automático:** A cada `git push` no repositório GitHub, a Cloudflare compila a aplicação web e também compila o código C++ do ESP8266 via `arduino-cli`. A ESP baixa a nova versão de firmware pelo ar (Over-The-Air) automaticamente, sem necessidade de cabos.
 
 ---
@@ -33,14 +33,15 @@ O diferencial do projeto é sua integração completa entre hardware e web:
                ▼                            ▼                            ▼
     ┌──────────────────────┐    ┌──────────────────────┐    ┌──────────────────────┐
     │     Navegador        │    │ Cloudflare Functions │    │  ESP8266 NodeMCU     │
-    │  (Desktop / Mobile)  │◀──▶│   + Cloudflare KV    │◀──▶│  (Hardware Físico)   │
-    │                      │    │   (Banco de Dados)   │    │                      │
-    │ - Taxa Nativa (dt)   │    │ - users:list         │    │ - Display LCD 20x4   │
-    │ - Perfis de Usuário  │    │ - user:<id>:state    │    │ - Top Player no LCD  │
-    │ - Loja de Oficinas   │    │ - gamestate (global) │    │ - Botão Físico (D5)  │
-    │ - Árvore Tecnológica │    └──────────────────────┘    │ - Flash LittleFS     │
-    │ - Aba Status & HW    │                                │ - Auto-Update OTA    │
-    └──────────────────────┘                                └──────────────────────┘
+    │  (Desktop / Mobile)  │◀──▶│  + D1 SQL Primário   │◀──▶│  (Hardware Físico)   │
+    │                      │    │  + KV Cache Rápido   │    │                      │
+    │ - Taxa Nativa (dt)   │    │ (Dual-Engine 100k/d) │    │ - Display LCD 20x4   │
+    │ - Perfis & Auto-Sync │    │ - users (D1 SQL)     │    │ - Dono / Top no LCD  │
+    │ - Loja de Oficinas   │    │ - user_states (D1)   │    │ - Botão Físico (D5)  │
+    │ - Árvore Tecnológica │    │ - hardware_lease (D1)│    │ - Flash LittleFS     │
+    │ - Tomar ESP (Lease)  │    │ - ip_bans (D1 SQL)   │    │ - Auto-Update OTA    │
+    │ - Aba Status & HW    │    │ - MAKITA_KV (Cache)  │    │ - BearSSL 2560/768   │
+    └──────────────────────┘    └──────────────────────┘    └──────────────────────┘
 ```
 
 ---
@@ -87,8 +88,10 @@ O frontend foi desenvolvido com foco em alta performance, responsividade e desac
    - Calcula a produção passiva contínua pelo delta de tempo (`dt`), somando frações precisas de Makitas a cada quadro.
    - Atualiza o contador de saldo e a taxa de MPS continuamente para máxima fluidez visual.
 2. **Sistema de Perfis & Salvamento na Nuvem:**
-   - **Criação de Perfil Instantânea:** Ao entrar no site, o usuário seleciona um perfil existente ou digita um nome para criar um novo perfil (salvo instantaneamente no KV da Cloudflare).
-   - **Salvamento Automático & Manual:** O progresso local é salvo no Cloudflare KV a cada 3 minutos, ou instantaneamente pelo botão **"💾 Salvar na Nuvem"**.
+   - **Criação de Perfil Instantânea & Sanitização de Nomes:** Ao criar ou trocar de perfil, o apelido é sanitizado para ser 100% legível no display LCD HD44780 (remoção de acentos como `á`, `õ`, cedilha `ç`, ordinais `º`/`ª`, restringindo a `[a-zA-Z0-9 _-]` com até 16 caracteres).
+   - **Desduplicação Automática de Apelidos:** Se vários jogadores utilizarem o mesmo nome, o sistema adiciona dinamicamente sufixos numéricos ordenados pela data de criação (`Pedro`, `Pedro 2`, `Pedro 3`...), preservando o nome original no perfil mais antigo.
+   - **Recuperação e Auto-Upload de Perfis Locais:** Perfis criados offline ou em dispositivos móveis presentes no `localStorage` são detectados e enviados automaticamente ao Cloudflare D1/KV com seu progresso completo (saldo, oficinas e árvore de habilidades).
+   - **Salvamento Automático & Manual Dual-Engine:** O progresso local é salvo no Cloudflare D1 (SQL relacional) e replicado no Cloudflare KV a cada 3 minutos, ou instantaneamente pelo botão **"💾 Salvar na Nuvem"**.
    - **Alerta de Saída (`beforeunload`):** Se houver progresso acumulado localmente há mais de 5 minutos sem salvamento na nuvem, o navegador exibe um popup de confirmação antes de fechar a aba.
    - **Barra de Perfil:** Exibe o nome do perfil ativo, botão para alternar de jogador e indicador visual com horário do último salvamento na nuvem.
 3. **Renderização Otimizada com Throttling (6 FPS):**
@@ -96,13 +99,15 @@ O frontend foi desenvolvido com foco em alta performance, responsividade e desac
 4. **Abas de Navegação:**
    - **🌳 Melhorias Permanentes:** Árvore tecnológica (*Skill Tree*) com pré-requisitos visuais conectando nós pai e filho, multiplicadores globais aditivos e bônus de clique.
    - **📊 Estatísticas:** Total histórico produzido, oficinas ativas, multiplicadores e botão de **Reset Total**.
-   - **📡 Status & Hardware:** Monitoramento ao vivo do microcontrolador físico (veja abaixo).
+   - **📡 Status & Hardware:** Monitoramento ao vivo do microcontrolador físico e posse da máquina (veja abaixo).
 5. **Aba "📡 Status & Hardware":**
+   - **Posse Exclusiva da Máquina Físico-Digital (Hardware Lease):** Exibe quem é o dono temporário da ESP8266 física. Jogadores podem clicar em **"🕹️ Tomar ESP"** para assumir o controle físico por 3 minutos (180 segundos). O display LCD do laboratório passa a exibir o nome do jogador e o cronômetro regressivo.
    - **LED Pulsante:** Verde para ESP online (contato há menos de 90s), laranja se sem sinal recente, cinza se desconectada.
    - **Ping / Latência:** Medição em tempo real da conexão HTTP entre o navegador e os servidores da Cloudflare.
    - **Comparativo de Firmware:** Versão remota (`version.json`) vs. versão instalada no chip físico.
    - **Telemetria do Microcontrolador:** RSSI do sinal Wi-Fi (em dBm com classificação de qualidade), IP local na rede, Uptime (tempo de atividade) e RAM livre (Heap).
-   - **Diagnóstico Cloudflare KV:** Indica se o banco está ativo e qual o binding em uso.
+   - **Diagnóstico Dual-Engine (Cloudflare D1 + KV):** Indica se o banco SQL D1 e o cache KV estão ativos (`_storage: "D1+KV (Dual-Engine)"`).
+   - **Proteção Anti-AutoClicker:** Monitoramento de cliques sintéticos (`isTrusted=false`), CPS > 28 ou cadência robótica uniforme. O usuário é suspenso por 5 minutos com registro no D1/KV (`ip_bans`) e resposta HTTP 429. O hardware físico da ESP é imune.
    - **Handshake de Reset:** Indica se há ordem de limpeza pendente aguardando confirmação da ESP.
    - **Botão "🔄 Atualizar Agora":** Dispara teste instantâneo de latência e sincronização de dados.
 
@@ -114,11 +119,12 @@ A placa **ESP8266 NodeMCU** é 100% autônoma e opera sem necessidade de qualque
 
 1. **Clock a 160 MHz:** A CPU roda em frequência máxima (`system_update_cpu_freq(160)`) para processar requisições HTTPS com TLS moderno e desenhar o LCD sem atrasos.
 2. **Botão Físico com Interrupção de Hardware (0 ms de Latência):** Monitorado via interrupção externa no pino **D5** (`attachInterrupt` em `FALLING` com `INPUT_PULLUP` e `ICACHE_RAM_ATTR`). Possui filtro de debounce de 25 ms em microssegundos e drenagem atômica no `loop()`. **Zero cliques perdidos**, mesmo durante requisições de rede HTTPS ou handshakes TLS.
-3. **Display LCD 20×4 I2C a 400 kHz com Double-Buffering Estático:**
+3. **Display LCD 20×4 I2C a 400 kHz com Double-Buffering Estático & Sanitização:**
    - **I2C Fast Mode:** Barramento configurado para **400 kHz** (`Wire.setClock(400000)`), reduzindo a ocupação da CPU na transmissão em 75%.
    - **Zero Fragmentação de DRAM:** Utiliza buffers estáticos `char[21]` com `snprintf` e comparação por `strncmp`, sem nenhuma alocação dinâmica da classe `String` no caminho crítico.
+   - **Tratamento de Caracteres (`sanitizarParaLCD`):** Converte caracteres acentuados e símbolos incompatíveis para ASCII simples (ex: `ç` vira `c`, `º` vira `o`), evitando caracteres corrompidos no LCD.
    - **Tela Principal (4 Linhas Transparentes e Diretas):**
-     - **Linha 0 (Líder Global / Top Player):** Líder geral atual do ranking com saldo (`1o: <Nome> (<Saldo>)`).
+     - **Linha 0 (Dono da ESP ou Líder Global):** Se a placa estiver em posse de um jogador via Web, exibe `Dono: <Nome> (MM:SS)`. Se estiver livre, exibe o líder geral atual do ranking com saldo: `1o: <Nome> (<Saldo>)`.
      - **Linha 1 (Saldo Atual):** Saldo de Makitas acumuladas no console (`Makitas: 125.4k MKT` ou `Makitas: 99B (META!)`).
      - **Linha 2 (Produção / Corte):** Taxa passiva e ganho por clique (`Prod: +15.0/s   (+1)`), alternando instantaneamente para `>> CORTE EFETUADO! <<` por 600 ms ao pressionar o botão.
      - **Linha 3 (Status Operacional ao Vivo):** Indica o estado exato da máquina: `Status: Ativo`, `Status: Offline`, `Status: Conectando`, `Status: Sincroniz.`, `Status: Apagando...`, `Status: Reset OK!` ou progresso do OTA (`>> GRAVANDO: XX% <<`).
@@ -127,17 +133,17 @@ A placa **ESP8266 NodeMCU** é 100% autônoma e opera sem necessidade de qualque
    - A cada 10 segundos, de forma totalmente assíncrona, tenta reconectar ao Wi-Fi sem travar o loop principal nem a leitura do botão.
    - O display reflete a tentativa alternando para `Status: Conectando` durante a negociação e revertendo para `Status: Offline` em caso de falha temporária.
 5. **Persistência Flash com Wear-Leveling Shield (LittleFS):** O estado é salvo no arquivo `/gamestate.json` a cada 30 segundos, mas **apenas se houver alterações reais não salvas** (`isFlashDirty == true`). Evita gravações redundantes, **reduzindo o desgaste da flash SPI em mais de 90%**.
-6. **Telemetria Contínua & Memória Otimizada:** A cada 5 segundos, a ESP envia à nuvem seu IP, versão de firmware, RSSI Wi-Fi, Uptime e RAM livre, com buffers BearSSL configurados em `2048/512` bytes para poupar 15 KB de DRAM.
+6. **Telemetria Contínua & Buffers Calibrados (BearSSL):** A ESP envia à nuvem seu IP, versão de firmware, RSSI Wi-Fi, Uptime e RAM livre a cada 2.0s (quando ativa com cliques) ou 3.5s (em repouso). Os buffers TLS BearSSL são calibrados em `2560` bytes (RX) e `768` bytes (TX) com timeout de `2500ms`. O backend devolve respostas enxutas (< 700 bytes) sem telemetria web desnecessária, prevenindo truncation TLS.
 7. **Handshake de Reset Não-Bloqueante (Zero-Recursion):** O envio de confirmação (`resetAck: true`) é agendado no `loop()`, eliminando chamadas recursivas e protegendo a pilha contra *Stack Overflow*.
 
 ---
 
-## 🤝 Handshake de Reset Latente e Consistência Eventual no KV
+## 🤝 Handshake de Reset Latente e Consistência Eventual no D1/KV
 
 Para evitar que o progresso seja restaurado acidentalmente no site por nós CDN da Cloudflare com propagação defasada (*eventual consistency*) ou enquanto a ESP8266 mantém um saldo antigo offline:
 
-1. **Ordens de Reset Latentes no Cloudflare KV:**
-   - Quando um reset global é emitido (no jogo ou no Painel Admin), a flag `resetPendingEsp: true` é gravada no KV com um `resetId`.
+1. **Ordens de Reset Latentes no Cloudflare D1 e KV:**
+   - Quando um reset global é emitido (no jogo ou no Painel Admin), a flag `resetPendingEsp: true` é gravada no banco com um `resetId`.
    - **A ordem é 100% latente:** ela **nunca desaparece** do servidor enquanto a ESP8266 física não responder com `resetAck: true`.
    - Enquanto o ACK não for recebido, o servidor rejeita sumariamente qualquer saldo, clique ou compra residual antiga enviada pela ESP.
 2. **Execução e Confirmação no Hardware (ESP8266):**
@@ -161,7 +167,7 @@ O painel administrativo permite gerenciar a base de dados de jogadores e o hardw
 > A senha existe para proteger a integridade do jogo e evitar que jogadores apaguem acidentalmente o progresso uns dos outros. No código JavaScript, a senha é validada através de seu hash criptográfico SHA-256 (`c9a2abd67ad59717195e5d8a6f917ba5084d81af244b0a8d40c8b30f234742d7`) gerado localmente pelo navegador (`crypto.subtle.digest`), evitando o envio de senhas em texto puro.
 
 ### Funcionalidades do Painel:
-- **Gerenciamento de Perfis:** Exibe tabela completa de perfis salvos no Cloudflare KV com ID, apelido, data de cadastro e progresso de Makitas.
+- **Gerenciamento de Perfis:** Exibe tabela completa de perfis salvos no Cloudflare D1 e KV com ID, apelido (desduplicado), data de cadastro e progresso de Makitas.
 - **Exclusão Segura:** Permite remover jogadores individualmente (com recálculo dinâmico do `topPlayer` líder) ou apagar toda a base de perfis com confirmação em duas etapas.
 - **Reset do Console Físico:** Dispara a reinicialização de fábrica da telemetria e do progresso do hardware embarcado.
 

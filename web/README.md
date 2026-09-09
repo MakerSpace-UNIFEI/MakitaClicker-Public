@@ -31,29 +31,44 @@ web/
   - **Coluna Central:** Barra de perfil de usuário (`.profile-bar`), abas de navegação (**🌳 Melhorias Permanentes**, **📊 Estatísticas**, **📡 Status & Hardware**).
   - **Coluna Direita:** Loja de Oficinas com seletores de quantidade (`1`, `10`, `MAX`).
   - **Modal de Perfis (`#profileModal`):** Interface de abertura/troca com lista de perfis salvos no KV e formulário para criar novos jogadores instantaneamente.
-- **`style.css`**: Design system temático industrial escuro baseado nas cores da Makita (azul-petróleo `#008080`, laranja `#ff8f43` e vermelho `#ff3d00`). Animações aceleradas por GPU (`@keyframes pulseGreen`, `@keyframes spinBlade`), modal de login e badges de status de salvamento.
+- **`style.css`**: Design system temático industrial escuro baseado nas cores da Makita (azul-petróleo `#008080`, laranja `#ff8f43` e vermelho `#ff3d00`). Animações aceleradas por GPU (`@keyframes pulseGreen`, `@keyframes spinBlade`), modal de login, modal de confirmação de tomada da ESP, tela de aviso anti-autoclicker e badges de status de salvamento.
 - **`game.js`**: Motor autônomo desacoplado em camadas:
   1. *Camada de Simulação Contínua:* `gameLoop` fluido com `requestAnimationFrame` na taxa nativa do monitor, calculando produção passiva pelo delta de tempo (`dt`).
   2. *Camada de Renderização Throttled:* Executa a ~6 FPS para botões de compra, mantendo uso de CPU desprezível.
   3. *Camada de Perfis e Persistência Local:* Armazena o save isolado em `localStorage` sob `makita_clicker_state_<userId>` e perfil ativo em `makita_clicker_profile_id`.
-  4. *Camada de Sincronização Cloud:* Auto-save no Cloudflare KV a cada 3 minutos, salvamento manual com feedback visual e guarda `beforeunload` para progresso não salvo há mais de 5 minutos.
-  5. *Camada de Telemetria:* Monitoramento em tempo real do microcontrolador físico e latência da Cloudflare.
+  4. *Camada de Sincronização Cloud (Dual-Engine D1 + KV):* Auto-save a cada 3 minutos, salvamento manual com feedback visual e guarda `beforeunload` para progresso não salvo há mais de 5 minutos.
+  5. *Camada de Resiliência de Perfis:* Auto-upload transparente de perfis locais ausentes na nuvem.
+  6. *Camada de Telemetria e Hardware Lease:* Reivindicação do console físico ("Tomar ESP"), contagem regressiva de posse e monitoramento em tempo real do microcontrolador físico.
+  7. *Camada Anti-AutoClicker:* Bloqueio por 5 minutos em caso de CPS > 28 ou automação mecânica.
 
 ---
 
 ## 👤 Sistema de Perfis de Usuário
-- **Sem Senha:** Pensado para usabilidade instantânea no laboratório e na web; basta digitar um apelido ou escolher um perfil existente.
+
+- **Sem Senha & Instantâneo:** Pensado para usabilidade no laboratório e na web; basta digitar um apelido ou escolher um perfil existente.
+- **Sanitização de Apelidos (`sanitizeNick`):** Remove acentos e caracteres ordinais (`ç`, `º`, etc.), convertendo para ASCII simples e limitando a 16 caracteres. Garante legibilidade perfeita no display LCD 20x4 da máquina física.
+- **Desduplicação Automática de Nomes:** Se vários jogadores criarem perfis com o mesmo nome, o sistema adiciona automaticamente sufixos numéricos (`Pedro`, `Pedro 2`, `Pedro 3`...) baseado na antiguidade (`createdAt`). O jogador mais antigo preserva o apelido original.
+- **Auto-Upload de Perfis Locais:** Perfis criados offline ou em dispositivos móveis que existem apenas no `localStorage` são detectados na inicialização ou ao abrir a tela de perfis (`userFound: false`). O motor envia automaticamente uma requisição `create_user` seguida de `save_user_state` com todo o progresso (saldo, oficinas e árvore de habilidades), integrando o jogador à nuvem e ao ranking sem perda de dados.
 - **Isolamento de Progresso:** Saldo, oficinas adquiridas e nós da árvore tecnológica são exclusivos de cada jogador.
 - **Leaderboard Global / Top Player:** O jogador com maior saldo é calculado no backend e transmitido tanto para o display LCD da ESP8266 física quanto para a aba de estatísticas.
+
+---
+
+## 🕹️ Posse do Console Físico (Hardware Lease)
+
+- Qualquer jogador pode verificar quem controla o hardware na aba **Status & Hardware**.
+- O líder do ranking (ou outro jogador em tomada de controle) pode clicar em **"Tomar ESP"** (`claim_hardware`).
+- O servidor concede uma posse exclusiva de **180 segundos (3 minutos)**. Durante esse período, o display LCD da ESP exibe `Dono: <Nome> (MM:SS)` com atualização regressiva a cada ciclo.
+- O dono pode liberar o console antecipadamente via botão **"Liberar ESP"** (`release_hardware`).
 
 ---
 
 ## 📊 Aba de Estatísticas Detalhadas
 A aba **Estatísticas** organiza em tempo real métricas de sessão, persistência e produção:
 1. **Perfil & Sincronização na Nuvem:**
-   - **Perfil Ativo:** Apelido do jogador em sessão.
+   - **Perfil Ativo:** Apelido do jogador em sessão (com indicação do número do perfil desduplicado).
    - **Status na Nuvem:** Estado visual de sincronização (`🟢 Salvo na Nuvem` ou `🟡 Alterações pendentes`).
-   - **Último Save na Nuvem:** Data e horário da última persistência confirmada no Cloudflare KV.
+   - **Último Save na Nuvem:** Data e horário da última persistência confirmada no Cloudflare D1/KV.
    - **Criação do Perfil:** Data/hora de quando o jogador foi cadastrado.
    - **Tempo Nesta Sessão:** Cronômetro contínuo de tempo jogado na aba ativa.
    - **Líder Global (Top Player):** Jogador líder do ranking exibido também no LCD da ESP8266.
@@ -73,6 +88,7 @@ Implementada para monitorar a saúde e o status do console físico em tempo real
 
 | Componente na Tela | Fonte dos Dados | Descrição / Comportamento |
 |---|---|---|
+| **Posse do Hardware (Lease)** | `hardware_status` | Indica se a placa física está livre ou tomada, dono atual e botão "Tomar ESP". |
 | **Hero Card (Status Geral)** | `latestServerData.espTelemetry.lastPing` | Indicador com LED pulsante: Verde (< 90s), Laranja (90s–5min), Cinza (> 5min / offline). |
 | **Versão Remota** | `/version.json` | Versão de firmware compilada mais recente disponível na Cloudflare. |
 | **Versão na ESP8266** | `espTelemetry.fwVersion` | Versão atualmente em execução no chip físico. Exibe badge `✅ Atualizado` ou `⚠️ OTA Pendente`. |
@@ -81,7 +97,7 @@ Implementada para monitorar a saúde e o status do console físico em tempo real
 | **IP Local da ESP** | `espTelemetry.ip` | Endereço IP atribuído à NodeMCU no roteador do MakerSpace. |
 | **Uptime da ESP** | `espTelemetry.uptime` | Tempo contínuo de atividade desde o último boot (`Xh Ym Zs`). |
 | **RAM Livre (Heap)** | `espTelemetry.freeHeap` | Memória RAM livre em KB, útil para checar vazamentos de memória. |
-| **Cloudflare KV** | `_kv_connected` e `_kv_binding` | Diagnóstico de conexão do banco de dados na Cloudflare Pages. |
+| **Diagnóstico Storage** | `_storage` | Diagnóstico de conexão do banco de dados relacional D1 e do cache KV (`D1+KV (Dual-Engine)`). |
 | **Ordem de Reset** | `resetOrder` | Status do handshake de reset bidirecional. |
 | **Botão "🔄 Atualizar Agora"** | `btnTestPing` | Força sincronização imediata e medição de ping sob demanda. |
 
@@ -89,16 +105,18 @@ Implementada para monitorar a saúde e o status do console físico em tempo real
 
 ## ☁️ API Serverless (`functions/api/state.js`)
 
-A API roda em Workers da Cloudflare no modelo Edge Computing (baixa latência mundial).
+A API roda em Workers da Cloudflare no modelo Edge Computing (baixa latência mundial), utilizando arquitetura Dual-Engine:
+- **Cloudflare D1 (SQL Primário):** Tabelas `users`, `user_states`, `hardware_lease` e `ip_bans`.
+- **Cloudflare KV (Cache Rápido e Fallback):** Chaves `users:list`, `user:<id>:state`, `gamestate`, `hardware:controller` e `ban:ip:<ip>`.
 
 ### Endpoints
-- **`GET /api/state?action=list_users`**: Retorna a lista de todos os perfis cadastrados (`id`, `name`, `createdAt`, `lastSeen`, `makitas`).
-- **`GET /api/state?userId=<id>`**: Carrega o estado individual do jogador especificado + dados do `topPlayer`.
+- **`GET /api/state?action=list_users`**: Retorna a lista de todos os perfis cadastrados com apelidos desduplicados.
+- **`GET /api/state?action=get_hardware_status`**: Retorna o estado de controle físico da ESP8266.
+- **`GET /api/state?userId=<id>`**: Carrega o estado individual do jogador. Retorna `userFound: false` caso o ID ainda não exista no banco (acionando auto-upload).
 - **`GET /api/state`**: Retorna o estado global (utilizado pelo hardware da ESP8266) + dados do `topPlayer`.
-- **`POST /api/state`**: Executa ações autoritativas e salvamentos no Cloudflare KV.
+- **`POST /api/state`**: Executa ações autoritativas e salvamentos no Cloudflare D1/KV.
 
-### Formato Compactado do Estado (KV):
-Para manter o tráfego minúsculo e respeitar a cota diária gratuita do Cloudflare KV:
+### Formato Compactado do Estado:
 ```json
 {
   "makitas": 1250000.5,
@@ -110,14 +128,16 @@ Para manter o tráfego minúsculo e respeitar a cota diária gratuita do Cloudfl
 ```
 
 ### Ações Suportadas (`POST`):
-- `action: "create_user"`: Cria instantaneamente um perfil no KV (`users:list` e `user:<id>:state`).
-- `action: "save_user_state"`: Salva o progresso compactado do jogador no KV (valida `resetEpoch` para evitar ressurreição por consistência eventual).
-- `action: "reset_user_state"`: Zera o perfil no KV, gera novo `resetEpoch` e recalcula `topPlayer`.
-- `action: "sync"`: Utilizado pela ESP8266 para enviar telemetria, receber o estado global e dados do `topPlayer`.
+- `action: "create_user"`: Registra um perfil no banco D1 e no KV.
+- `action: "save_user_state"`: Salva o progresso compactado do jogador (com validação de `resetEpoch`).
+- `action: "reset_user_state"`: Zera o perfil no banco, gera novo `resetEpoch` e recalcula `topPlayer`.
+- `action: "claim_hardware"`: Reivindica a posse da máquina física ESP8266 por 3 minutos.
+- `action: "release_hardware"`: Libera voluntariamente a máquina física.
+- `action: "sync"`: Utilizado pela ESP8266 para enviar telemetria e cliques e receber estado mestre enxuto (< 700 bytes).
 - `action: "reset"`: Dispara handshake de limpeza global do hardware.
 - `action: "admin_verify"`: Valida o hash SHA-256 da senha administrativa (`ADMIN_PASSWORD`).
-- `action: "admin_delete_user"`: Remove um perfil específico do KV e atualiza a lista de usuários.
-- `action: "admin_delete_all_users"`: Remove todos os perfis cadastrados no KV.
+- `action: "admin_delete_user"`: Remove um perfil específico do D1 e KV.
+- `action: "admin_delete_all_users"`: Remove todos os perfis cadastrados no sistema.
 
 ---
 
@@ -127,8 +147,8 @@ Interface dedicada para gestão de perfis e manutenção do servidor:
 - **URL:** [https://makitaclicker.pages.dev/admin.html](https://makitaclicker.pages.dev/admin.html)
 - **Senha:** `ADMIN_PASSWORD` (validada via hash SHA-256 no cliente e no servidor para segurança de ponta a ponta).
 - **Funcionalidades:**
-  - Listagem completa de jogadores cadastrados com data de criação e saldo atual.
-  - Exclusão individual de perfis do Cloudflare KV.
+  - Listagem completa de jogadores cadastrados com ID, apelido desduplicado, data de cadastro e saldo atual.
+  - Exclusão individual de perfis do Cloudflare D1 e KV com recálculo imediato da liderança.
   - Exclusão em massa de todos os perfis com confirmação em duas etapas.
   - Reset forçado do estado global e telemetria do console físico.
 

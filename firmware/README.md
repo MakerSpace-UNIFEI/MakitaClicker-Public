@@ -4,10 +4,11 @@ Manual completo do firmware embarcado do **MakitaClicker** para o microcontrolad
 
 O firmware é 100% autônomo e opera com arquitetura de alta performance:
 - Leitura de botão físico via **Interrupção de Hardware (ISR)** com resposta instantânea de 0 ms e zero perda de cliques.
-- Display LCD 20×4 I2C operando em **Fast Mode (400 kHz)** com **double-buffering estático** (zero alocação dinâmica no Heap).
+- Display LCD 20×4 I2C operando em **Fast Mode (400 kHz)** com **double-buffering estático** (zero alocação dinâmica no Heap) e **sanitização ASCII** de caracteres.
+- Exibição de **Posse de Hardware** em tempo real (`Dono: <Nome> (MM:SS)`) e **Top Player Global** (`1o: <Nome> (<Saldo>)`).
 - Persistência em memória flash protegida por **Wear-Leveling Shield** via **LittleFS** (gravação condicional).
 - Reconexão Wi-Fi contínua e não-bloqueante a cada **10 segundos** com indicação visual dinâmica.
-- Sincronização HTTPS com Cloudflare Pages Functions & KV e proteção contra *Stack Overflow* (zero recursão no reset).
+- Sincronização HTTPS com Cloudflare Pages Functions (Dual-Engine D1 + KV) com buffers BearSSL calibrados (`2560/768` bytes, timeout `2500ms`) e proteção contra *Stack Overflow* (zero recursão no reset).
 - Auto-atualização de firmware **OTA (Over-The-Air)** com **checksum criptográfico MD5**, suporte a records de 16 KB e barra de progresso em tempo real no LCD.
 
 ---
@@ -50,15 +51,16 @@ firmware/
 O display opera com um layout industrial direto, limpo e sem poluição visual. Utiliza **double-buffering estático em arrays de caracteres (`char[21]`)**, eliminando o uso da classe `String` no caminho crítico de desenho para impedir a fragmentação da SRAM (DRAM):
 
 ```text
-Linha 0: 1o: Victor (12.5M)
+Linha 0: Dono: Victor (02:45)  OU  1o: Victor (12.5M)
 Linha 1: Makitas: 45.2k MKT
 Linha 2: Prod: +15.0/s   (+1)
 Linha 3: Status: Ativo
 ```
 
-### 1. Linha 0 (Líder Global / Top Player)
-- Exibe o jogador em 1° lugar no ranking geral do site e seu saldo atual: `1o: <Nome> (<Saldo>)`.
-- Se o ranking estiver vazio, exibe `1o: MakerSpace`.
+### 1. Linha 0 (Posse de Hardware ou Líder Global)
+- **Modo Posse Exclusiva (Hardware Lease):** Se algum jogador reivindicou a ESP pela Web ("Tomar ESP"), exibe o dono e a contagem regressiva de posse: `Dono: <Nome> (MM:SS)`.
+- **Modo Livre (Líder Global / Top Player):** Quando livre, exibe o 1° colocado do ranking geral e seu saldo: `1o: <Nome> (<Saldo>)`. Se o ranking estiver vazio, exibe `1o: MakerSpace`.
+- **Sanitização de Caracteres (`sanitizarParaLCD`):** Nomes com acentos ou caracteres especiais (ex: `ç`, `º`, `á`) são convertidos para caracteres ASCII puros correspondentes antes da exibição, prevenindo glifos defeituosos no controlador HD44780.
 - Trunca dinamicamente o nome caso necessário para caber com precisão nos 20 caracteres da linha.
 
 ### 2. Linha 1 (Saldo Atual)
@@ -101,7 +103,8 @@ Linha 3: Status: Ativo
 
 ## 📡 Telemetria e Sincronização HTTPS
 
-A cada 5 segundos (`syncWithCloud`), a ESP8266 envia um pacote JSON via HTTPS para `/api/state`:
+A ESP8266 sincroniza com a nuvem via HTTPS POST para `/api/state`:
+- **Cadência Dinâmica:** A cada **2.0 segundos** se houver cliques recentes pendentes, ou a cada **3.5 segundos** quando em repouso (idle), permitindo reação rápida a mudanças na liderança e na posse do console.
 
 ```json
 {
@@ -117,7 +120,8 @@ A cada 5 segundos (`syncWithCloud`), a ESP8266 envia um pacote JSON via HTTPS pa
 }
 ```
 
-A nuvem responde com o estado mestre atualizado, multiplicadores e os dados do **Top Player** da web. A alocação de buffers TLS BearSSL na sincronização é restrita para `client.setBufferSizes(2048, 512)`, poupando cerca de **15 KB de DRAM** na SRAM.
+A nuvem responde com o estado mestre atualizado, multiplicadores, informações de posse (`hardwareController`) e o **Top Player**.
+Os buffers TLS BearSSL são configurados em `client.setBufferSizes(2560, 768)` e `client.setTimeout(2500)`, prevenindo truncamento TLS e economizando DRAM sem estouro de buffer.
 
 ---
 

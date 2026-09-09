@@ -6,8 +6,8 @@ Este documento descreve as regras, arquitetura e convenções do projeto **Makit
 
 O projeto é um jogo incremental (Cookie Clicker) **híbrido** (Físico + Web).
 - **Web (`web/`):** Frontend Vanilla JS + CSS, empacotado via **Vite**.
-- **Backend (`functions/api/`):** API Serverless na Cloudflare Functions com Cloudflare KV (Banco de dados de Chave-Valor).
-- **Firmware (`firmware/codigo_esp/`):** C++ rodando em um ESP8266 NodeMCU.
+- **Backend (`functions/api/`):** API Serverless na Cloudflare Functions com arquitetura **Dual-Engine (Cloudflare D1 SQL + Cloudflare KV)**. O D1 atua como armazenamento relacional primário autoritativo (100.000 gravações gratuitas/dia) e o KV como cache de leitura rápida e redundância.
+- **Firmware (`firmware/codigo_esp/`):** C++ rodando em um ESP8266 NodeMCU autônomo com display LCD 20x4 I2C e botão mecânico de 0 ms.
 - **Build (`dist/`):** O comando `npm run build` cria a build Web via Vite e em seguida executa o script `build-firmware.sh` para compilar o `.bin` da ESP8266 (usando `arduino-cli`). Tudo é exportado para `dist/` e servido no Cloudflare Pages.
 
 ## 🧠 2. Padrões Técnicos e Regras de Negócio
@@ -16,34 +16,47 @@ O projeto é um jogo incremental (Cookie Clicker) **híbrido** (Físico + Web).
 - **Não adicione frameworks** (como React ou Vue). O frontend é 100% Vanilla JS focado em performance.
 - **Motor Gráfico:** O arquivo `game.js` roda o ciclo principal usando `requestAnimationFrame` na taxa de atualização nativa do monitor do usuário (sem bloqueio arbitrário a 60 FPS), calculando a produção passiva através do delta de tempo (`dt`).
 - **DOM Throttling:** Atualizações no DOM que não exigem taxa máxima (como atualizar listas de oficinas, textos descritivos) devem ser feitas via throttling (~6 FPS) para manter o uso de CPU mínimo.
-- **Sistema de Perfis de Usuário:** O jogo é individual por perfil (sem senha, focado em facilidade). O progresso local fica em `localStorage` sob a chave `makita_clicker_state_<userId>` e sincroniza na nuvem com Cloudflare KV a cada 3 minutos (auto-save) ou via botão manual ("Salvar na Nuvem").
+- **Sistema de Nomes e Sanitização:** O apelido do jogador passa por `sanitizeNick()`, que remove acentos, cedilhas (`ç`), caracteres ordinais (`º`, `ª`) e caracteres de controle, restringindo a `[a-zA-Z0-9 _-]` com comprimento máximo de 16 caracteres para caber com segurança no display LCD 20x4 do hardware.
+- **Desduplicação Automática:** Perfis com mesmo nome raiz recebem sufixos automáticos ordenados por data de criação (`Pedro`, `Pedro 2`, `Pedro 3`...). O nome mais antigo é preservado.
+- **Auto-Upload & Recuperação de Perfis Locais:** Se o navegador contiver um perfil em `localStorage` que ainda não foi registrado na nuvem (ex: criado offline ou mobile), o frontend detecta (`userFound: false` na resposta `/api/state?userId=<id>`) e dispara automaticamente a criação (`create_user`) e o salvamento (`save_user_state`) com todo o progresso acumulado.
+- **Salvamento na Nuvem:** O progresso sincroniza na nuvem com D1/KV a cada 3 minutos (auto-save) ou via botão manual ("💾 Salvar na Nuvem").
+- **Posse do Console Físico (Hardware Lease):** Qualquer jogador pode tentar tomar a posse da ESP física clicando em "Tomar ESP" (ação `claim_hardware`), garantindo 180 segundos de exclusividade. O display LCD reflete o dono temporário e a contagem regressiva em tempo real.
 - **Proteção contra Perda de Progresso:** Um listener `beforeunload` avisa o jogador caso ele tente fechar o navegador com progresso local não salvo há mais de 5 minutos.
-- **Proteção Anti-AutoClicker (Ban de 5 min por IP):** O cliente detecta cliques sintéticos (`isTrusted=false`), CPS desumano (>28 CPS) e variância robótica com intervalo constante. Ao detectar, bloqueia a interface com modal de contagem regressiva e reporta ao backend, que suspende o IP na Cloudflare (`ban:ip:<clientIp>`, TTL 300s no KV) respondendo com HTTP 429 nas requisições. A placa física ESP8266 (`source: esp`) é imune ao ban de IP.
+- **Proteção Anti-AutoClicker (Ban de 5 min por IP):** O cliente detecta cliques sintéticos (`isTrusted=false`), CPS desumano (>28 CPS) e variância robótica. Ao detectar, suspende o IP por 5 minutos gravando na tabela `ip_bans` (D1) e na chave `ban:ip:<clientIp>` (KV com TTL 300s). A placa física ESP8266 (`source: esp`) é estritamente imune.
 
-### Backend (Reconciliação, Perfis e Compactação no KV)
-- **Sincronismo Assíncrono:** O Frontend e a ESP enviam dados via POST para `/api/state`. 
-- **Chaves no Cloudflare KV:**
-  - `users:list`: Lista com metadados de todos os perfis cadastrados (`id`, `name`, `createdAt`, `lastSeen`, `makitas`).
-  - `user:<userId>:state`: Estado individual de jogo do usuário.
-  - `gamestate`: Estado global mantido para compatibilidade e sincronização da ESP8266 física.
-- **Serialização Compacta:** Para otimizar armazenamento e cota de rede no KV, os upgrades e melhorias permanentes são compactados em vetores indexados:
+### Backend (Dual-Engine D1 + KV, Desduplicação e Otimização para ESP)
+- **Sincronismo Assíncrono:** O Frontend e a ESP enviam dados via POST para `/api/state`.
+- **Armazenamento Dual-Engine:**
+  - **Cloudflare D1 (SQL Primário):**
+    - `users`: ID, nome original, saldo de makitas, timestamps de criação e último acesso.
+    - `user_states`: Estado serializado completo em JSON, `reset_epoch` e timestamp de atualização.
+    - `hardware_lease`: Registro único do dono temporário da ESP (`controller_user_id`, `controller_user_name`, `lease_expires_at`).
+    - `ip_bans`: Lista de bloqueios temporários de IPs infratores.
+  - **Cloudflare KV (Cache Rápido e Redundância):**
+    - `users:list`: Lista serializada de usuários com nomes desduplicados.
+    - `user:<userId>:state`: Estado individual de jogo do usuário.
+    - `gamestate`: Estado global mantido para telemetria e sincronização do hardware físico.
+    - `hardware:controller`: Snapshot em cache da posse da ESP.
+- **Serialização Compacta:**
   - `upgrades`: Array denso de 24 inteiros `[q0, q1, ..., q23]`.
   - `perms`: Array esparso contendo os índices numéricos das habilidades desbloqueadas `[0, 1, 4]`.
-  - `resetEpoch`: Timestamp de época do último reset, utilizado para anular saves defasados de nós CDN com consistência eventual.
-- **Top Player / Leaderboard:** O backend calcula automaticamente o jogador com maior saldo de Makitas (`topPlayer: { name, makitas }`) e o injeta nas respostas para o frontend e para o firmware da ESP8266.
+  - `resetEpoch`: Timestamp de época do último reset, utilizado para anular saves defasados.
+- **Otimização Crítica para Firmware ESP:** Quando uma requisição possui `source: 'esp'`, a API remove diagnósticos extensos da resposta e devolve um JSON enxuto (< 700 bytes) contendo apenas o estado mestre, multiplicadores, o dono do hardware e o `topPlayer`. Isso impede saturação de memória na ESP8266.
+- **Top Player / Leaderboard:** O backend calcula automaticamente o jogador com maior saldo de Makitas (`topPlayer: { name, makitas }`) e o injeta nas respostas.
 - **Regra de Ouro (Isolamento de Saves vs. Hardware Global):** 
   - Perfis de usuário não herdam nem sofrem `Math.max` com o saldo da ESP física (`gamestate`).
-  - O salvamento de usuário só é aceito se o `resetEpoch` do payload for `>=` ao `resetEpoch` gravado no KV, eliminando a ressurreição de saves zumbis decorrentes da consistência eventual da Cloudflare.
+  - O salvamento de usuário só é aceito se o `resetEpoch` do payload for `>=` ao `resetEpoch` gravado no banco.
 - **Painel Administrativo (`/admin.html`):**
   - Rota protegida por hash SHA-256 da senha `ADMIN_PASSWORD` (`c9a2abd67ad59717195e5d8a6f917ba5084d81af244b0a8d40c8b30f234742d7`).
   - Permite verificar credenciais (`admin_verify`), deletar perfil individual (`admin_delete_user`), deletar todos os perfis (`admin_delete_all_users`) e forçar reset global de hardware (`admin_reset_hardware`).
-- O Cloudflare KV tem limite de gravações gratuitas (1.000 writes/dia). O backend utiliza cache e o frontend controla a periodicidade de salvamento do estado do usuário.
 
 ### Firmware (C++ ESP8266)
 - **Sem bloqueios:** É proibido usar `delay()` no loop principal. Toda temporização deve ser não-bloqueante usando `millis()` ou `yield()`.
-- **Interrupção de Hardware:** A leitura do botão físico no pino D5 deve sempre ser tratada por ISR (`ICACHE_RAM_ATTR`) com debounce por microssegundos e drenagem atômica no `loop()`, garantindo zero perda de cliques.
-- **Display LCD (I2C 400 kHz):** O LCD (20x4) usa double-buffering estático em `char[21]` com `snprintf` e comparação por `strncmp`. Nunca use alocações dinâmicas de `String` no caminho de desenho.
-- **Top Player na Tela:** A Linha 0 do LCD exibe o líder do ranking global recebido via nuvem (`1o: <nome> (<saldo>)`).
+- **Interrupção de Hardware:** A leitura do botão físico no pino D5 é tratada por ISR (`ICACHE_RAM_ATTR`) com debounce por microssegundos e drenagem atômica no `loop()`. Zero cliques perdidos.
+- **Buffers BearSSL Calibrados:** O cliente HTTPS usa `client.setBufferSizes(2560, 768)` e timeout de `2500ms`, garantindo recepção de pacotes TLS sem truncamento e liberando memória SRAM.
+- **Cadência de Sincronização Dinâmica:** Sincroniza a cada 2.0s se houver cliques recentes pendentes, ou a cada 3.5s em repouso (idle).
+- **Display LCD (I2C 400 kHz) & Sanitização:** Double-buffering estático em `char[21]`. A função `sanitizarParaLCD()` converte caracteres fora da tabela ASCII para caracteres legíveis.
+- **Linha 0 do LCD Dinâmica:** Exibe `Dono: <Nome> (MM:SS)` se a ESP foi tomada via Web, ou `1o: <Nome> (<Saldo>)` com o líder geral caso a posse esteja livre.
 - **LittleFS Wear-Leveling Shield:** O estado é persistido em `/gamestate.json` a cada 30 segundos, mas **apenas se houver alterações pendentes** (`isFlashDirty == true`). Sempre execute `LittleFS.end()` antes de gravações de OTA.
 - **OTA Seguro:** O manifesto `version.json` exige validação por checksum criptográfico MD5 (`setMD5sum`) e buffer BearSSL completo para records de 16 KB.
 
@@ -58,17 +71,19 @@ O arquivo central configurável é o `game-config.json` na raiz do repositório.
 ### Modificar o Handshake de Reset
 O reset é bidirecional para evitar ressurreição de dados offline antigos.
 - Se alterar a lógica, mantenha o ciclo: 
-  `Web envia reset` -> `KV liga resetOrder=true` -> `ESP recebe ordem` -> `ESP apaga Flash` -> `ESP envia resetAck=true` -> `KV desliga resetOrder`.
+  `Web envia reset` -> `D1/KV liga resetOrder=true` -> `ESP recebe ordem` -> `ESP apaga Flash` -> `ESP envia resetAck=true` -> `D1/KV desliga resetOrder`.
 
 ## 🚀 4. Desenvolvimento Local
 - **Frontend:** Rode `npm run dev`. O frontend vai detectar o modo local e cortar as requisições HTTPS para simular o jogo offline perfeitamente.
 - **ESP8266:** Só precisa compilar a primeira vez via USB. A placa auto-atualiza o `.bin` via rede a cada push na branch `main`.
 
 ## 🌐 5. API de Leitura Pública (Read-All API)
-Como o repositório é privado, está disponível um token de leitura da Cloudflare para que serviços externos e IAs possam inspecionar os dados do banco KV e telemetria:
+Como o repositório é privado, está disponível um token de leitura da Cloudflare para que serviços externos e IAs possam inspecionar os dados do banco D1/KV e telemetria:
 
 - **API Token (Read-Only):** Definido via variável `$CF_READ_TOKEN` (chave `cfat_*` de leitura)
 - **Account ID:** `<CLOUDFLARE_ACCOUNT_ID>`
+- **D1 Database ID (`makitaclicker-db`):** `<SEU_D1_DATABASE_ID>`
 - **KV Namespace ID (`makita-kv`):** `<SEU_KV_NAMESPACE_ID>`
-- **Documentação Completa:** Consulte [`API_READ_GUIDE.md`](./API_READ_GUIDE.md) para exemplos práticos de chamadas `curl`, Node.js e Python para ler o ranking (`users:list`), estado de usuários (`user:<id>:state`), telemetria do hardware (`hardware:controller`, `gamestate`) e status de deploys do Pages.
+- **Documentação Completa:** Consulte [`API_READ_GUIDE.md`](./API_READ_GUIDE.md) para exemplos práticos de chamadas `curl`, Node.js e Python para consultar o D1 SQL, o cache KV e os endpoints REST da aplicação.
+
 
