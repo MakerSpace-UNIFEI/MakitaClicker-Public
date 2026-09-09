@@ -444,6 +444,52 @@ function sanitizeNick(raw) {
   return s.slice(0, 16);
 }
 
+// Desambiguação de nomes duplicados: mantém o nome original para o perfil mais antigo
+// e sufixa 2, 3, 4 etc para perfis mais recentes criados com mesmo nome, respeitando o limite de 16 caracteres do LCD
+function deduplicateUserNames(list) {
+  if (!Array.isArray(list) || list.length === 0) return { list: [], changed: false };
+
+  // 1. Ordena cronologicamente por createdAt ascendente (mais antigo tem prioridade)
+  const sorted = [...list].sort((a, b) => {
+    const timeA = Number(a.createdAt) || 0;
+    const timeB = Number(b.createdAt) || 0;
+    if (timeA !== timeB) return timeA - timeB;
+    return String(a.id || '').localeCompare(String(b.id || ''));
+  });
+
+  const usedNames = new Set();
+  let changed = false;
+
+  for (const user of sorted) {
+    if (!user || !user.id) continue;
+    const originalName = sanitizeNick(user.name || 'Maker');
+
+    // Extrai a raiz sem sufixo numérico trailing (ex: "Pedro 2" -> raiz "Pedro")
+    const match = originalName.match(/^(.*?)(?:\s+(\d+))?$/);
+    const rootName = (match && match[1] && match[1].trim()) ? match[1].trim() : originalName;
+
+    let candidate = originalName;
+    let count = 1;
+
+    // Se já estiver em uso por outro usuário criado anteriormente, incrementa sufixo
+    while (usedNames.has(candidate.toLowerCase())) {
+      count++;
+      const suffix = ` ${count}`;
+      const maxBaseLen = 16 - suffix.length;
+      const truncatedRoot = rootName.slice(0, Math.max(1, maxBaseLen)).trim();
+      candidate = (truncatedRoot + suffix).slice(0, 16);
+    }
+
+    if (candidate !== user.name) {
+      user.name = candidate;
+      changed = true;
+    }
+    usedNames.add(candidate.toLowerCase());
+  }
+
+  return { list: sorted, changed };
+}
+
 async function saveUserMeta(env, userEntry) {
   if (!userEntry || !userEntry.id) return;
   const db = getD1(env);
@@ -486,8 +532,13 @@ async function loadUsersList(env) {
       ).all();
 
       if (results && results.length > 0) {
-        memoryFallbackUsers = results;
-        return results;
+        const { list: deduped, changed } = deduplicateUserNames(results);
+        if (changed) {
+          console.log('[DEDUP] Nomes duplicados desambiguados no D1.');
+          await saveUsersList(env, deduped);
+        }
+        memoryFallbackUsers = deduped;
+        return deduped;
       }
 
       // Se o D1 estiver vazio mas houver dados no KV, migra automaticamente do KV para o D1!
@@ -554,8 +605,12 @@ async function loadUsersList(env) {
   }
 
   const merged = Array.from(map.values());
-  memoryFallbackUsers = merged;
-  return merged;
+  const { list: deduped, changed } = deduplicateUserNames(merged);
+  if (changed) {
+    await saveUsersList(env, deduped);
+  }
+  memoryFallbackUsers = deduped;
+  return deduped;
 }
 
 async function saveUsersList(env, list) {
@@ -611,7 +666,7 @@ async function loadUserState(env, userId) {
         parsed.saveRev = row.save_rev || parsed.saveRev || 0;
         parsed.resetEpoch = row.reset_epoch || parsed.resetEpoch || 0;
         advancePassiveProduction(parsed, Date.now());
-        return { state: parsed, kvName: 'D1', kvConnected: true, kvDiag: 'Carregado do Cloudflare D1' };
+        return { state: parsed, isNew: false, kvName: 'D1', kvConnected: true, kvDiag: 'Carregado do Cloudflare D1' };
       }
 
       // Migração sob demanda do KV para D1:
@@ -622,7 +677,7 @@ async function loadUserState(env, userId) {
           const parsed = expandUserState(kvRaw);
           advancePassiveProduction(parsed, Date.now());
           await saveUserState(env, userId, parsed);
-          return { state: parsed, kvName: 'KV->D1', kvConnected: true, kvDiag: 'Migrado do KV para o D1' };
+          return { state: parsed, isNew: false, kvName: 'KV->D1', kvConnected: true, kvDiag: 'Migrado do KV para o D1' };
         }
       }
     } catch (e) {
@@ -646,6 +701,7 @@ async function loadUserState(env, userId) {
   }
 
   const memState = memoryFallbackUserStates[userId];
+  const isFound = !!(kvState || memState);
   let state = kvState || memState || getDefaultState();
 
   if (kvState && memState) {
@@ -664,10 +720,10 @@ async function loadUserState(env, userId) {
     }
   }
 
-  return { state, kvName: name, kvConnected: !!kv, kvDiag: diag };
+  return { state, isNew: !isFound, kvName: name, kvConnected: !!kv, kvDiag: diag };
 }
 
-async function saveUserState(env, userId, state) {
+async function saveUserState(env, userId, state, userName = null) {
   const currentMem = memoryFallbackUserStates[userId];
   if (currentMem) {
     const memReset = currentMem.resetEpoch || 0;
@@ -682,12 +738,23 @@ async function saveUserState(env, userId, state) {
   const saveRev = Number(state.saveRev) || 0;
   const resetEpoch = Number(state.resetEpoch) || 0;
   const now = Date.now();
+  const resolvedName = sanitizeNick(userName || state.name || 'Maker');
+  const createdAt = Number(state.createdAt) || now;
 
   const db = getD1(env);
   if (db) {
     try {
       await ensureD1Tables(db);
       await db.batch([
+        db.prepare(`
+          INSERT INTO users (id, name, created_at, last_saved_at, makitas, total_makitas_made)
+          VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            name = CASE WHEN excluded.name != '' AND excluded.name != 'Maker' THEN excluded.name ELSE users.name END,
+            last_saved_at = excluded.last_saved_at,
+            makitas = excluded.makitas,
+            total_makitas_made = excluded.total_makitas_made
+        `).bind(userId, resolvedName, createdAt, now, Number(state.makitas) || 0, Number(state.totalMakitasMade) || 0),
         db.prepare(`
           INSERT INTO user_states (user_id, state_json, save_rev, reset_epoch, updated_at)
           VALUES (?, ?, ?, ?, ?)
@@ -696,12 +763,7 @@ async function saveUserState(env, userId, state) {
             save_rev = excluded.save_rev,
             reset_epoch = excluded.reset_epoch,
             updated_at = excluded.updated_at
-        `).bind(userId, stateJson, saveRev, resetEpoch, now),
-        db.prepare(`
-          UPDATE users
-          SET last_saved_at = ?, makitas = ?, total_makitas_made = ?
-          WHERE id = ?
-        `).bind(now, Number(state.makitas) || 0, Number(state.totalMakitasMade) || 0, userId)
+        `).bind(userId, stateJson, saveRev, resetEpoch, now)
       ]);
     } catch (e) {
       console.error('[D1] Erro ao salvar estado:', e);
@@ -713,6 +775,14 @@ async function saveUserState(env, userId, state) {
   if (kv) {
     try {
       await kv.put(getUserStateKey(userId), stateJson);
+      await kv.put(`user_meta:${userId}`, JSON.stringify({
+        id: userId,
+        name: resolvedName,
+        createdAt,
+        lastSavedAt: now,
+        makitas: Number(state.makitas) || 0,
+        totalMakitasMade: Number(state.totalMakitasMade) || 0
+      }));
     } catch (err) {
       console.error(`[KV] Erro ao salvar estado do usuário ${userId}:`, err);
     }
@@ -951,6 +1021,8 @@ export async function onRequestGet(context) {
   const userId = url.searchParams.get('userId');
   const clientUserId = url.searchParams.get('clientUserId') || userId;
   const clientUserName = url.searchParams.get('clientUserName');
+  const clientMakitas = Number(url.searchParams.get('clientMakitas')) || 0;
+  const clientTotalMakitas = Number(url.searchParams.get('clientTotalMakitas')) || clientMakitas;
 
   const { kvName, kvConnected, diag } = getKV(env);
   const db = getD1(env);
@@ -969,11 +1041,11 @@ export async function onRequestGet(context) {
       const { state: uState } = await loadUserState(env, clientUserId);
       meta = {
         id: clientUserId,
-        name: clientUserName || 'Maker',
+        name: sanitizeNick(clientUserName || uState.name || 'Maker'),
         createdAt: uState.createdAt || Date.now(),
         lastSavedAt: uState.lastSavedAt || Date.now(),
-        makitas: uState.makitas || 0,
-        totalMakitasMade: uState.totalMakitasMade || uState.makitas || 0
+        makitas: Math.max(Number(uState.makitas) || 0, clientMakitas),
+        totalMakitasMade: Math.max(Number(uState.totalMakitasMade) || Number(uState.makitas) || 0, clientTotalMakitas)
       };
     }
     usersList.push(meta);
@@ -1003,12 +1075,14 @@ export async function onRequestGet(context) {
 
   // 2. Rota de Estado Individual de Perfil
   if (userId) {
-    const { state } = await loadUserState(env, userId);
+    const { state, isNew } = await loadUserState(env, userId);
     const now = Date.now();
     advancePassiveProduction(state, now);
 
     return new Response(JSON.stringify({
       ...state,
+      userFound: !isNew,
+      isNewUser: !!isNew,
       topPlayer,
       hardwareOwner,
       _storage: storageType,
@@ -1276,7 +1350,7 @@ export async function onRequestPost(context) {
 
     return new Response(JSON.stringify({
       success: true,
-      hardwareOwner: { active: false, userId: null, userName: null, expiresAt: 0, remainingSec: 0 },
+      hardwareOwner: { active: false, userId: null, userName: null, releasedAt: Date.now(), expiresAt: 0, remainingSec: 0 },
       topPlayer,
       _storage: storageType,
       _d1_connected: !!db,
@@ -1293,30 +1367,35 @@ export async function onRequestPost(context) {
   // AÇÃO 1: CRIAR NOVO PERFIL DE USUÁRIO (Salvo imediatamente no KV)
   // -------------------------------------------------------------
   if (action === 'create_user') {
-    const name = sanitizeNick(body.name);
+    const rawName = sanitizeNick(body.name);
     const now = Date.now();
     const userId = 'u_' + now.toString(36) + '_' + Math.random().toString(36).slice(2, 6);
 
-    const initialState = getDefaultState();
-    await saveUserState(env, userId, initialState);
-
     const newUserEntry = {
       id: userId,
-      name,
+      name: rawName,
       createdAt: now,
       lastSavedAt: now,
       makitas: 0,
       totalMakitasMade: 0
     };
 
-    await saveUserMeta(env, newUserEntry);
+    // Desambiguação automática de nomes duplicados baseada em tempo de criação:
     usersList.push(newUserEntry);
+    const { list: dedupedList } = deduplicateUserNames(usersList);
+    usersList = dedupedList;
+    const finalUser = usersList.find(u => u.id === userId) || newUserEntry;
+
+    const initialState = getDefaultState();
+    initialState.name = finalUser.name;
+    await saveUserState(env, userId, initialState, finalUser.name);
+    await saveUserMeta(env, finalUser);
     await saveUsersList(env, usersList);
     topPlayer = getTopPlayer(usersList);
 
     return new Response(JSON.stringify({
       success: true,
-      user: newUserEntry,
+      user: finalUser,
       state: initialState,
       topPlayer,
       hardwareOwner,
@@ -1383,12 +1462,19 @@ export async function onRequestPost(context) {
       expanded.resetEpoch = currentState.resetEpoch;
     }
 
-    await saveUserState(env, userId, expanded);
-
     // Atualiza resumo no users:list para ranking
     const userIndex = usersList.findIndex(u => u.id === userId);
-    const resolvedName = sanitizeNick(body.userName || body.name || (userIndex >= 0 ? usersList[userIndex].name : 'Maker'));
+    let resolvedName = sanitizeNick(body.userName || body.name || (userIndex >= 0 ? usersList[userIndex].name : 'Maker'));
     let isNewUserInList = false;
+    const createdAt = Number(body.createdAt || (userIndex >= 0 ? usersList[userIndex].createdAt : currentState?.createdAt)) || now;
+    const userEntry = {
+      id: userId,
+      name: resolvedName,
+      createdAt,
+      lastSavedAt: now,
+      makitas: expanded.makitas,
+      totalMakitasMade: expanded.totalMakitasMade
+    };
 
     if (userIndex >= 0) {
       usersList[userIndex].lastSavedAt = now;
@@ -1397,20 +1483,26 @@ export async function onRequestPost(context) {
       if (body.userName) usersList[userIndex].name = resolvedName;
     } else {
       isNewUserInList = true;
-      usersList.push({
-        id: userId,
-        name: resolvedName,
-        createdAt: currentState?.createdAt || now,
-        lastSavedAt: now,
-        makitas: expanded.makitas,
-        totalMakitasMade: expanded.totalMakitasMade
-      });
+      usersList.push(userEntry);
     }
 
-    // Economia estrita de cota KV: só grava USERS_LIST_KEY se for novo usuário ou se superou o líder
+    // Desambiguação de nomes duplicados baseada em tempo de criação (createdAt)
+    const { list: dedupedUsers, changed: dedupChanged } = deduplicateUserNames(usersList);
+    usersList = dedupedUsers;
+    const updatedUser = usersList.find(u => u.id === userId);
+    if (updatedUser) {
+      resolvedName = updatedUser.name;
+      userEntry.name = resolvedName;
+    }
+
+    expanded.name = resolvedName;
+    await saveUserState(env, userId, expanded, resolvedName);
+
+    // Economia estrita de cota KV: só grava USERS_LIST_KEY se for novo usuário, renomeado ou superou o líder
     const isNewLeader = expanded.totalMakitasMade > (topPlayer?.totalMakitasMade || 0);
-    if (isNewUserInList || isNewLeader) {
+    if (isNewUserInList || dedupChanged || isNewLeader) {
       await saveUsersList(env, usersList);
+      await saveUserMeta(env, userEntry);
     }
     topPlayer = getTopPlayer(usersList);
 
@@ -1841,13 +1933,18 @@ export async function onRequestPost(context) {
         pendingOrder: activeOrder,
         lastResetExecutedAt: state.lastResetExecutedAt || 0,
         queueLength: state.hardwareOrders.length,
-        topPlayer,
-        hardwareOwner,
-        _storage: storageType,
-      _d1_connected: !!db,
-      _kv_connected: kvConnected,
-        _kv_binding: kvName || 'NONE',
-        _kv_diag: diag
+        topPlayer: {
+          id: topPlayer?.id || '',
+          name: topPlayer?.name || 'MakerSpace',
+          makitas: topPlayer?.makitas || 0
+        },
+        hardwareOwner: {
+          active: !!hardwareOwner?.active,
+          userId: hardwareOwner?.userId || null,
+          userName: hardwareOwner?.userName || null,
+          claimedAt: hardwareOwner?.claimedAt || 0,
+          remainingSec: hardwareOwner?.remainingSec || 0
+        }
       }), {
         status: 200,
         headers: CORS_HEADERS
@@ -1857,23 +1954,26 @@ export async function onRequestPost(context) {
     // Roteamento dinâmico de cliques e dados da ESP8266:
     // Se houver dono ativo do console físico, credita e sincroniza com o perfil do dono.
     // Se não houver dono ativo, credita e sincroniza com o 1º colocado (topPlayer).
-    const targetUserId = hardwareOwner.active ? hardwareOwner.userId : topPlayer.id;
+    const targetUserId = (hardwareOwner && hardwareOwner.active && hardwareOwner.userId) 
+      ? hardwareOwner.userId 
+      : (topPlayer?.id || (usersList.length > 0 ? usersList[0].id : null));
 
+    let targetState = null;
     if (targetUserId) {
-      let { state: targetState } = await loadUserState(env, targetUserId);
-      if (!targetState) {
-        targetState = getDefaultState();
-      }
-      advancePassiveProduction(targetState, now);
+      const loaded = await loadUserState(env, targetUserId);
+      targetState = loaded.state;
+    }
+    if (!targetState) {
+      targetState = getDefaultState();
+    }
+    advancePassiveProduction(targetState, now);
 
-      if (clicks > 0) {
-        const gainPerClick = getSingleClickGain(targetState.perms, targetState.mps);
-        const totalGain = gainPerClick * clicks;
-        targetState.makitas = (targetState.makitas || 0) + totalGain;
-        targetState.totalMakitasMade = (targetState.totalMakitasMade || 0) + totalGain;
-        targetState.lastSavedAt = now;
-      }
-
+    if (clicks > 0 && targetUserId) {
+      const gainPerClick = getSingleClickGain(targetState.perms, targetState.mps);
+      const totalGain = gainPerClick * clicks;
+      targetState.makitas = (targetState.makitas || 0) + totalGain;
+      targetState.totalMakitasMade = (targetState.totalMakitasMade || 0) + totalGain;
+      targetState.lastSavedAt = now;
       await saveUserState(env, targetUserId, targetState);
 
       const uIdx = usersList.findIndex(u => u.id === targetUserId);
@@ -1884,35 +1984,46 @@ export async function onRequestPost(context) {
         await saveUsersList(env, usersList);
       }
       topPlayer = getTopPlayer(usersList);
-
-      state.espTelemetry.activeTargetUserId = targetUserId;
-      state.espTelemetry.activeTargetName = hardwareOwner.active ? hardwareOwner.userName : topPlayer.name;
-      state.lastUpdate = now;
-      await saveState(env, state);
-
-      return new Response(JSON.stringify({
-        targetUserId,
-        targetUserName: hardwareOwner.active ? hardwareOwner.userName : topPlayer.name,
-        makitas: targetState.makitas,
-        totalMakitasMade: targetState.totalMakitasMade,
-        owned: targetState.owned || {},
-        perms: targetState.perms || {},
-        mps: targetState.mps || 0,
-        clickPower: targetState.clickPower || 1,
-        topPlayer,
-        hardwareOwner,
-        lastResetExecutedAt: state.lastResetExecutedAt || 0,
-        resetOrder: false,
-        _storage: storageType,
-      _d1_connected: !!db,
-      _kv_connected: kvConnected,
-        _kv_binding: kvName || 'NONE',
-        _kv_diag: diag
-      }), {
-        status: 200,
-        headers: CORS_HEADERS
-      });
     }
+
+    const resolvedTargetName = (hardwareOwner && hardwareOwner.active && hardwareOwner.userName) 
+      ? hardwareOwner.userName 
+      : (topPlayer?.name || 'MakerSpace');
+
+    state.espTelemetry.activeTargetUserId = targetUserId || '';
+    state.espTelemetry.activeTargetName = resolvedTargetName;
+    state.lastUpdate = now;
+    await saveState(env, state);
+
+    // Resposta compacta e leve para o ESP8266 (elimina engasgos e cabe perfeitamente no buffer RX TLS)
+    return new Response(JSON.stringify({
+      targetUserId: targetUserId || '',
+      targetUserName: resolvedTargetName,
+      makitas: targetState.makitas || 0,
+      totalMakitasMade: targetState.totalMakitasMade || 0,
+      owned: targetState.owned || {},
+      perms: targetState.perms || {},
+      mps: targetState.mps || 0,
+      clickPower: targetState.clickPower || 1,
+      topPlayer: {
+        id: topPlayer?.id || '',
+        name: topPlayer?.name || 'MakerSpace',
+        makitas: topPlayer?.makitas || 0,
+        totalMakitasMade: topPlayer?.totalMakitasMade || 0
+      },
+      hardwareOwner: {
+        active: !!hardwareOwner?.active,
+        userId: hardwareOwner?.userId || null,
+        userName: hardwareOwner?.userName || null,
+        claimedAt: hardwareOwner?.claimedAt || 0,
+        remainingSec: hardwareOwner?.remainingSec || 0
+      },
+      lastResetExecutedAt: state.lastResetExecutedAt || 0,
+      resetOrder: false
+    }), {
+      status: 200,
+      headers: CORS_HEADERS
+    });
   }
 
   // TRATAMENTO DA ORDEM DE RESET LATENTE PARA CLIENTE WEB:

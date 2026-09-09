@@ -616,11 +616,12 @@ void syncWithCloud() {
 
   WiFiClientSecure client;
   client.setInsecure();
-  client.setBufferSizes(1024, 512); // Buffer reduzido para economizar RAM e acelerar alocação
+  client.setBufferSizes(2560, 768); // Buffer expandido para comportar respostas JSON da nuvem sem fragmentação
+  client.setTimeout(2500);
   client.setSession(&sslSession);    // <--- TLS Session Resumption! Handshake abreviado (~30ms)
 
   HTTPClient http;
-  http.setTimeout(1800); // Timeout reduzido para evitar travamento em caso de perda de pacote
+  http.setTimeout(2500);
   http.begin(client, STATE_URL);
   http.addHeader("Content-Type", "application/json");
 
@@ -815,14 +816,13 @@ void syncWithCloud() {
         }
 
         // Blindagem contra consistência eventual do Cloudflare KV:
-        // Se o timestamp claimedAt for anterior ao que já conhecemos (ex: recebemos pacote de 1:22
-        // mas o console já está no dono de 1:24), descarta completamente o pacote obsoleto!
-        if (remoteClaimedAt > 0 && lastHardwareOwnerClaimedAt > 0 && remoteClaimedAt < lastHardwareOwnerClaimedAt) {
+        // Se o timestamp claimedAt for anterior ao que já conhecemos quando ativo, descarta pacote obsoleto
+        if (active && remoteClaimedAt > 0 && lastHardwareOwnerClaimedAt > 0 && remoteClaimedAt < lastHardwareOwnerClaimedAt) {
           Serial.printf("[OWNER] Rejeitando proprietario obsoleto do KV (recebido: %llu < atual: %llu)\n",
                         (unsigned long long)remoteClaimedAt, (unsigned long long)lastHardwareOwnerClaimedAt);
           isStaleOwnerPayload = true;
         } else {
-          if (remoteClaimedAt >= lastHardwareOwnerClaimedAt) {
+          if (remoteClaimedAt > lastHardwareOwnerClaimedAt) {
             lastHardwareOwnerClaimedAt = remoteClaimedAt;
           }
           if (active) {
@@ -990,11 +990,12 @@ bool enviarAckOrdem(const char* orderId) {
 
   WiFiClientSecure client;
   client.setInsecure();
-  client.setBufferSizes(1024, 512);
+  client.setBufferSizes(2560, 768);
+  client.setTimeout(2500);
   client.setSession(&sslSession);
 
   HTTPClient http;
-  http.setTimeout(2000);
+  http.setTimeout(2500);
   http.begin(client, STATE_URL);
   http.addHeader("Content-Type", "application/json");
 
@@ -1266,8 +1267,8 @@ void setup() {
 unsigned long lastTick = 0;
 unsigned long lastCloudSync = 0;
 unsigned long lastLocalSave = 0;
-const unsigned long CLOUD_SYNC_INTERVAL_ACTIVE_MS = 2500; // 2.5s se houver cliques físicos pendentes
-const unsigned long CLOUD_SYNC_INTERVAL_IDLE_MS   = 8000; // 8s quando ocioso (poupa CPU, elimina engasgos e mantém o display fluido)
+const unsigned long CLOUD_SYNC_INTERVAL_ACTIVE_MS = 2000; // 2.0s se houver cliques físicos pendentes
+const unsigned long CLOUD_SYNC_INTERVAL_IDLE_MS   = 3500; // 3.5s quando ocioso (rápido para claim de console e ranking sem travar a CPU)
 const unsigned long LOCAL_SAVE_INTERVAL_MS = 30000;       // Autosave condicional na flash a cada 30 segundos
 
 void gerenciarWiFi() {

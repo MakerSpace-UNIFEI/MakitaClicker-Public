@@ -426,6 +426,8 @@ function getCompactGameState() {
         if (p.purchased) permsArr.push(idx);
     });
     return {
+        name: currentUserName || 'Maker',
+        createdAt: currentUserCreatedAt || Date.now(),
         makitas,
         totalMakitasMade,
         totalClicks,
@@ -1845,10 +1847,13 @@ function handleHardwareClaimClick() {
             openHardwareBusyModal(latestHardwareOwner);
         }
     } else {
-        // Se eu já sou o líder (1º lugar), informar que já sou o dono padrão
+        // Se eu já sou o líder (1º lugar), permite travar exclusividade com confirmação
         const isLeader = latestTopPlayer && latestTopPlayer.id && latestTopPlayer.id === currentUserId;
         if (isLeader) {
-            alert('👑 Você já é o 1º lugar no ranking!\n\nOs cliques físicos do console ESP8266 já são creditados automaticamente no seu perfil.\n\nVocê só precisa "Tomar Console" se quiser travar o controle por 3 minutos (impedir que outro jogador assuma).');
+            const ok = confirm('👑 Você é o 1º colocado do ranking!\n\nOs cliques da ESP já são creditados para seu perfil. Deseja travar a exclusividade do console físico por 3 minutos para que ninguém possa tomar de você?');
+            if (ok) {
+                claimHardware(true);
+            }
         } else {
             claimHardware(false);
         }
@@ -1982,17 +1987,77 @@ async function openProfileModal() {
     }
 
     try {
-        const url = `/api/state?action=list_users&clientUserId=${encodeURIComponent(currentUserId || '')}&clientUserName=${encodeURIComponent(currentUserName || '')}&_t=${Date.now()}`;
+        const url = `/api/state?action=list_users&clientUserId=${encodeURIComponent(currentUserId || '')}&clientUserName=${encodeURIComponent(currentUserName || '')}&clientMakitas=${Math.floor(makitas || 0)}&clientTotalMakitas=${Math.floor(totalMakitasMade || makitas || 0)}&_t=${Date.now()}`;
         const res = await fetch(url, { cache: 'no-store' });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         if (data.hardwareOwner) {
             setLatestHardwareOwner(data.hardwareOwner);
         }
-        renderProfileList(data.users || []);
+        let users = Array.isArray(data.users) ? [...data.users] : [];
+
+        // Auto-reconciliação de perfis locais: se houver perfis no localStorage que não estão na lista da nuvem,
+        // inclui-os na lista visual e dispara o registro/envio para o Cloudflare D1/KV
+        try {
+            for (let i = 0; i < localStorage.length; i++) {
+                const key = localStorage.key(i);
+                if (key && key.startsWith('makitaclicker_save_')) {
+                    const localUid = key.substring('makitaclicker_save_'.length);
+                    if (localUid && !users.some(u => u.id === localUid)) {
+                        let localState = null;
+                        try { localState = JSON.parse(localStorage.getItem(key)); } catch (e) {}
+                        
+                        const profileName = (localUid === currentUserId && currentUserName) 
+                            ? currentUserName 
+                            : (localState?.name || 'Maker');
+                        
+                        const localUserEntry = {
+                            id: localUid,
+                            name: profileName,
+                            createdAt: localState?.createdAt || Date.now(),
+                            lastSavedAt: localState?.lastSavedAt || Date.now(),
+                            makitas: Number(localState?.makitas) || 0,
+                            totalMakitasMade: Number(localState?.totalMakitasMade) || Number(localState?.makitas) || 0
+                        };
+                        users.push(localUserEntry);
+
+                        if (localUid === currentUserId) {
+                            saveUserProgressToCloud(false);
+                        }
+                    }
+                }
+            }
+        } catch (e) {}
+
+        renderProfileList(users);
     } catch (e) {
-        console.warn('Erro ao carregar lista de usuários:', e);
-        if (profileListContainerEl) {
+        console.warn('Erro ao carregar lista de usuários da nuvem:', e);
+        // Resiliência offline: carrega perfis locais mesmo sem conexão
+        const localUsers = [];
+        try {
+            for (let i = 0; i < localStorage.length; i++) {
+                const key = localStorage.key(i);
+                if (key && key.startsWith('makitaclicker_save_')) {
+                    const localUid = key.substring('makitaclicker_save_'.length);
+                    if (localUid) {
+                        let localState = null;
+                        try { localState = JSON.parse(localStorage.getItem(key)); } catch (err) {}
+                        localUsers.push({
+                            id: localUid,
+                            name: (localUid === currentUserId && currentUserName) ? currentUserName : (localState?.name || 'Maker'),
+                            createdAt: localState?.createdAt || Date.now(),
+                            lastSavedAt: localState?.lastSavedAt || Date.now(),
+                            makitas: Number(localState?.makitas) || 0,
+                            totalMakitasMade: Number(localState?.totalMakitasMade) || Number(localState?.makitas) || 0
+                        });
+                    }
+                }
+            }
+        } catch (err) {}
+
+        if (localUsers.length > 0) {
+            renderProfileList(localUsers);
+        } else if (profileListContainerEl) {
             profileListContainerEl.innerHTML = '<div class="profile-list-empty">Não foi possível carregar os perfis. Crie um novo abaixo!</div>';
         }
     }
@@ -2073,7 +2138,8 @@ function selectProfile(user) {
 
 async function fetchUserProfileState(userId) {
     try {
-        const res = await fetch(`/api/state?userId=${encodeURIComponent(userId)}&_t=${Date.now()}`);
+        const url = `/api/state?userId=${encodeURIComponent(userId)}&clientUserId=${encodeURIComponent(currentUserId || '')}&clientUserName=${encodeURIComponent(currentUserName || '')}&clientMakitas=${Math.floor(makitas || 0)}&clientTotalMakitas=${Math.floor(totalMakitasMade || makitas || 0)}&_t=${Date.now()}`;
+        const res = await fetch(url);
         if (res.status === 429) {
             const errData = await res.json().catch(() => ({}));
             if (errData.banned) {
@@ -2090,17 +2156,22 @@ async function fetchUserProfileState(userId) {
 
         // 2. Compara progresso entre Local e Nuvem considerando patrimônio total (makitas + oficinas + árvore)
         const cmp = compareProgress(currentLocal, data);
+        const isProfileMissingInCloud = (data.userFound === false || data.isNewUser === true);
 
-        if (cmp > 0) {
-            // O LOCAL É MAIOR/MAIS AVANÇADO QUE A NUVEM!
-            // O local prevalece e atualiza a nuvem com os dados superiores locais
-            console.log('[SYNC] Progresso local é MAIOR que a nuvem. Local prevalece.');
-            logEl.textContent = '⚡ Progresso local mais avançado que a nuvem. Sincronizando com a nuvem...';
+        if (isProfileMissingInCloud || cmp > 0) {
+            // O LOCAL É MAIOR/MAIS AVANÇADO QUE A NUVEM OU O PERFIL NÃO EXISTE NA NUVEM!
+            // O local prevalece e cria/atualiza a nuvem com os dados locais
+            console.log('[SYNC] ' + (isProfileMissingInCloud 
+                ? 'Perfil local não encontrado na nuvem. Criando perfil e enviando progresso local...' 
+                : 'Progresso local é MAIOR que a nuvem. Sincronizando com a nuvem...'));
+            logEl.textContent = isProfileMissingInCloud 
+                ? '⚡ Perfil local registrado e sincronizado com a nuvem!' 
+                : '⚡ Progresso local mais avançado que a nuvem. Sincronizando com a nuvem...';
             logEl.style.color = 'var(--teal)';
 
             mergeSafeIntoLocal(data);
             saveLocalState();
-            // Dispara envio para a nuvem para atualizar o KV defasado
+            // Dispara envio para a nuvem para criar o perfil e subir o progresso!
             saveUserProgressToCloud(false);
         } else if (cmp < 0) {
             // A NUVEM É MAIS AVANÇADA
@@ -2214,6 +2285,7 @@ async function saveUserProgressToCloud(isManual = false) {
         action: 'save_user_state',
         userId: currentUserId,
         userName: currentUserName,
+        createdAt: currentUserCreatedAt,
         state: getCompactGameState()
     };
 
@@ -2494,6 +2566,48 @@ function initGame() {
     const storedCreatedAt = localStorage.getItem('makita_active_user_created_at');
     if (storedCreatedAt) {
         currentUserCreatedAt = Number(storedCreatedAt);
+    }
+
+    // Auto-detecção defensiva de perfil local:
+    // Se não há perfil ativo em makita_active_user_id, procura por perfis locais existentes no localStorage
+    if (!currentUserId) {
+        try {
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                if (k && k.startsWith('makitaclicker_save_')) {
+                    const candidateId = k.substring('makitaclicker_save_'.length);
+                    if (candidateId) {
+                        currentUserId = candidateId;
+                        let savedData = null;
+                        try { savedData = JSON.parse(localStorage.getItem(k)); } catch (e) {}
+                        currentUserName = savedData?.name || localStorage.getItem('makita_active_user_name') || 'Maker';
+                        currentUserCreatedAt = savedData?.createdAt || Date.now();
+                        localStorage.setItem('makita_active_user_id', currentUserId);
+                        localStorage.setItem('makita_active_user_name', currentUserName);
+                        localStorage.setItem('makita_active_user_created_at', String(currentUserCreatedAt));
+                        break;
+                    }
+                }
+            }
+
+            // Se ainda não encontrou mas existe save legado local (sem perfil id)
+            if (!currentUserId) {
+                const legacySave = localStorage.getItem('makitaclicker_save');
+                if (legacySave) {
+                    const parsed = JSON.parse(legacySave);
+                    if (parsed && (parsed.makitas > 0 || parsed.totalMakitasMade > 0 || (parsed.upgrades && parsed.upgrades.some(x => x > 0)))) {
+                        currentUserId = 'u_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+                        currentUserName = 'Maker';
+                        currentUserCreatedAt = Date.now();
+                        localStorage.setItem('makita_active_user_id', currentUserId);
+                        localStorage.setItem('makita_active_user_name', currentUserName);
+                        localStorage.setItem('makita_active_user_created_at', String(currentUserCreatedAt));
+                        localStorage.setItem(`makitaclicker_save_${currentUserId}`, legacySave);
+                        console.log('[MIGRATION] Save local legado migrado para perfil:', currentUserId);
+                    }
+                }
+            }
+        } catch (e) {}
     }
 
     if (btnSwitchProfileEl) {
