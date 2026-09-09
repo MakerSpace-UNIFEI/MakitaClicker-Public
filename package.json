@@ -5,8 +5,9 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build:web": "vite build",
+    "sync:config": "node scripts/sync-config.js",
+    "dev": "node scripts/sync-config.js && vite",
+    "build:web": "node scripts/sync-config.js && vite build",
     "build:firmware": "bash build-firmware.sh",
     "build": "npm run build:web && npm run build:firmware"
   },

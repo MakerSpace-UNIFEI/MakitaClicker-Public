@@ -204,15 +204,11 @@ const char* password = "SENHA_DO_SEU_WIFI";
 ```
 Faça o commit e push. Na próxima conexão, ou gravando manualmente via USB, a ESP conectará na nova rede.
 
-### 2. Adicionar ou Modificar Oficinas (Loja)
-As oficinas devem ter suas configurações espelhadas para manter paridade entre Web, Cloud e ESP:
-- **No Servidor:** [`functions/api/state.js`](functions/api/state.js) (array `UPGRADES`).
-- **No Frontend:** [`web/game.js`](web/game.js) (array `upgrades`).
-- **No Firmware:** [`firmware/codigo_esp/codigo_esp.ino`](firmware/codigo_esp/codigo_esp.ino) (struct `UPGRADE_CONFIGS`).
-
-### 3. Adicionar Habilidades na Árvore Tecnológica
-- Defina o nó no array `PERMANENT_UPGRADES` em [`functions/api/state.js`](functions/api/state.js) e [`web/game.js`](web/game.js), indicando `id`, `name`, `cost`, `req` (total acumulado necessário) e `parent` (habilidade pré-requisito).
-- Se a habilidade tiver efeito na produção física da ESP, adicione a respectiva variável booleana em [`firmware/codigo_esp/codigo_esp.ino`](firmware/codigo_esp/codigo_esp.ino) dentro da função `recalculateStats()`.
+### 2. Configurar Oficinas (Loja) e Árvore de Habilidades
+As oficinas e tecnologias agora são centralizadas no arquivo [`game-config.json`](game-config.json) na raiz do repositório:
+- **Configuração Única:** Edite os arrays `upgrades` (oficinas) e `skillTree` (tecnologias, requisitos, custos e `effects` dinâmicos) em [`game-config.json`](game-config.json).
+- **Adicionado no Build:** Durante `npm run build` ou `npm run dev`, o arquivo é automaticamente empacotado no frontend ([`web/`](web/)), exportado como endpoint estático ([`dist/game-config.json`](dist/game-config.json)) e sincronizado com o backend serverless ([`functions/api/`](functions/api/)).
+- **Firmware (se afetar a ESP):** Em caso de alterações em multiplicadores do chip autônomo, espelhe na struct `UPGRADE_CONFIGS` ou na função `recalculateStats()` em [`firmware/codigo_esp/codigo_esp.ino`](firmware/codigo_esp/codigo_esp.ino).
 
 ### 4. Testes Locais da Web
 Para testar o site localmente com Hot Module Replacement, rode os comandos:

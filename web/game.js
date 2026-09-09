@@ -1,6 +1,9 @@
+import gameConfig from './game-config.json';
+
 // =====================================================================
 // MAKITA CLICKER - MOTOR DE JOGO (RENDERIZAÇÃO NATIVA) + SYNC COM NUVEM
 // Sistema de Perfis de Usuário + Cloudflare KV + LocalStorage
+// Loja e Árvore de Habilidades derivadas de game-config.json
 // =====================================================================
 
 let isLocalMode = false;
@@ -18,11 +21,14 @@ const sessionStartTime = Date.now();
 let latestTopPlayer = null;
 let latestHardwareOwner = null;
 
-// ---------- estado ----------
+// ---------- CONSTANTES CONFIGURÁVEIS (DO GAME-CONFIG.JSON) ----------
+const MAX_OWNED = gameConfig.meta?.maxOwnedPerUpgrade || 100;
+const GOAL_MAKITAS = gameConfig.meta?.goalMakitas || 99000000000;
+
+// ---------- ESTADO DO JOGO ----------
 let makitas = 0;
 let mps = 0;
 let buyQty = 1;
-const MAX_OWNED = 100;
 
 // Total de makitas acumuladas no histórico
 let totalMakitasMade = 0;
@@ -33,240 +39,31 @@ let isDirty = true;
 let lastThrottledRender = 0;
 const THROTTLE_RENDER_MS = 150; // Atualiza estados de botões/árvore com cadência suave
 
-// ---------- 24 UPGRADES DA LOJA (PROGRESSÃO ATÉ 99B+) ----------
-const upgrades = [
-    { id: 'upgrade1',          name: 'Bancada Básica',            icon: '⚙️', baseCost: 10,           growth: 1.10, mps: 0.1 },
-    { id: 'upgrade_1mps',      name: 'Esmerilhadeira Manual',      icon: '🪚', baseCost: 100,          growth: 1.12, mps: 1.0 },
-    { id: 'upgrade_2mps',      name: 'Serra Mármore 1400W',       icon: '⚡', baseCost: 250,          growth: 1.12, mps: 2.0 },
-    { id: 'upgrade_5mps',      name: 'Torno Mecânico',            icon: '🔧', baseCost: 750,          growth: 1.13, mps: 5.0 },
-    { id: 'upgrade_10mps',     name: 'Fresadora CNC',             icon: '🎛️', baseCost: 1800,         growth: 1.13, mps: 10.0 },
-    { id: 'upgrade_15mps',     name: 'Robô de Solda Industrial',   icon: '🦾', baseCost: 3500,         growth: 1.14, mps: 15.0 },
-    { id: 'upgrade_20mps',     name: 'Cortadora a Laser CO2',     icon: '🔴', baseCost: 6000,         growth: 1.14, mps: 20.0 },
-    { id: 'upgrade_25mps',     name: 'Prensa Hidráulica 50T',      icon: '🏗️', baseCost: 10000,        growth: 1.14, mps: 25.0 },
-    { id: 'upgrade_30mps',     name: 'Impressora 3D de Metal',    icon: '🖨️', baseCost: 16000,        growth: 1.15, mps: 30.0 },
-    { id: 'upgrade_50mps',     name: 'Linha de Montagem IA',      icon: '🤖', baseCost: 35000,        growth: 1.15, mps: 50.0 },
-    { id: 'upgrade_100mps',    name: 'Mega Fábrica Makita',       icon: '🏭', baseCost: 100000,       growth: 1.15, mps: 100.0 },
-    { id: 'upgrade_200mps',    name: 'Reator de Fusão Maker',     icon: '☢️', baseCost: 300000,       growth: 1.16, mps: 200.0 },
-    { id: 'upgrade_500mps',    name: 'Estação Espacial Orbital',   icon: '🛸', baseCost: 1000000,      growth: 1.16, mps: 500.0 },
-    { id: 'upgrade_1200mps',   name: 'Acelerador de Partículas',  icon: '🌀', baseCost: 3500000,      growth: 1.16, mps: 1200.0 },
-    { id: 'upgrade_3000mps',   name: 'Mineração de Asteroides',   icon: '☄️', baseCost: 12000000,     growth: 1.16, mps: 3000.0 },
-    { id: 'upgrade_8000mps',   name: 'Usina Vulcânica Maker',     icon: '🌋', baseCost: 40000000,     growth: 1.17, mps: 8000.0 },
-    { id: 'upgrade_20kmps',    name: 'Forja de Antimatéria',       icon: '⚛️', baseCost: 150000000,    growth: 1.17, mps: 20000.0 },
-    { id: 'upgrade_60kmps',    name: 'Computador Quântico UNIFEI',icon: '💻', baseCost: 500000000,    growth: 1.17, mps: 60000.0 },
-    { id: 'upgrade_180kmps',   name: 'Esfera de Dyson Makita',    icon: '☀️', baseCost: 1800000000,   growth: 1.17, mps: 180000.0 },
-    { id: 'upgrade_500kmps',   name: 'Portal Dimensional Maker',  icon: '🌌', baseCost: 6000000000,   growth: 1.18, mps: 500000.0 },
-    { id: 'upgrade_1500kmps',  name: 'Manipulador Gravitacional', icon: '🪐', baseCost: 20000000000,  growth: 1.18, mps: 1500000.0 },
-    { id: 'upgrade_5000kmps',  name: 'Motor de Dobra Espacial',   icon: '🚀', baseCost: 60000000000,  growth: 1.18, mps: 5000000.0 },
-    { id: 'upgrade_15000kmps', name: 'Fábrica de Realidade Paralela',icon: '🔮', baseCost: 200000000000,growth: 1.19, mps: 15000000.0 },
-    { id: 'upgrade_50000kmps', name: 'Big Bang Maker Contínuo',   icon: '💥', baseCost: 800000000000, growth: 1.19, mps: 50000000.0 }
-];
+// ---------- OFICINAS DA LOJA (DERIVADAS DO GAME-CONFIG.JSON) ----------
+const upgrades = (gameConfig.upgrades || []).map(u => ({
+    id: u.id,
+    name: u.name,
+    icon: u.icon || '⚙️',
+    baseCost: Number(u.baseCost) || 10,
+    growth: Number(u.growth) || 1.15,
+    mps: Number(u.mps) || 0
+}));
 
 const owned = {};
 upgrades.forEach(u => { owned[u.id] = 0; });
 
-// ---------- 20 HABILIDADES NA ÁRVORE PERMANENTE (ATÉ 99B) ----------
-const permanentUpgrades = [
-    {
-        id: 'perm_lubrificante',
-        name: 'Óleo Sintético Premium',
-        icon: '🛢️',
-        cost: 25,
-        reqMakitas: 10,
-        reqUpgrade: null,
-        desc: 'Reduz o atrito dos motores. Aumenta a velocidade de fabricação em +10%.',
-        purchased: false
-    },
-    {
-        id: 'perm_disco_diamante',
-        name: 'Disco Diamantado Reforçado',
-        icon: '💠',
-        cost: 100,
-        reqMakitas: 50,
-        reqUpgrade: 'perm_lubrificante',
-        desc: 'Cortes ultra afiados. Aumenta o poder de clique manual em +1 por clique.',
-        purchased: false
-    },
-    {
-        id: 'perm_motor_brushless',
-        name: 'Motor Brushless Industrial',
-        icon: '⚡',
-        cost: 300,
-        reqMakitas: 150,
-        reqUpgrade: 'perm_lubrificante',
-        desc: 'Motores sem escova de alta eficiência. Dobra o ganho base de todas as oficinas.',
-        purchased: false
-    },
-    {
-        id: 'perm_empunhadura',
-        name: 'Empunhadura Ergonômica Pro',
-        icon: '🧤',
-        cost: 600,
-        reqMakitas: 250,
-        reqUpgrade: 'perm_disco_diamante',
-        desc: 'Menor fadiga ao operar. Cliques manuais geram 5% do MPS atual instantaneamente.',
-        purchased: false
-    },
-    {
-        id: 'perm_bateria_litio',
-        name: 'Bateria Makita 40V Max XGT',
-        icon: '🔋',
-        cost: 1500,
-        reqMakitas: 600,
-        reqUpgrade: 'perm_motor_brushless',
-        desc: 'Alimentação contínua de lítio. +25% de produção permanente em todas as fontes.',
-        purchased: false
-    },
-    {
-        id: 'perm_ia_maker',
-        name: 'MakerBot Autônomo com IA',
-        icon: '🤖',
-        cost: 5000,
-        reqMakitas: 2000,
-        reqUpgrade: 'perm_bateria_litio',
-        desc: 'Automação inteligente de fabricação. Aumenta a produção global em +50%.',
-        purchased: false
-    },
-    {
-        id: 'perm_refrigeracao',
-        name: 'Sistema Criogênico de Nitrogênio',
-        icon: '❄️',
-        cost: 15000,
-        reqMakitas: 6000,
-        reqUpgrade: 'perm_motor_brushless',
-        desc: 'Resfriamento ultra rápido. +20% na velocidade global de produção.',
-        purchased: false
-    },
-    {
-        id: 'perm_titanio',
-        name: 'Lâmina de Titânio Forjada a Plasma',
-        icon: '🗡️',
-        cost: 35000,
-        reqMakitas: 12000,
-        reqUpgrade: 'perm_disco_diamante',
-        desc: 'Dureza atômica. Adiciona +3.0 de poder a cada clique manual.',
-        purchased: false
-    },
-    {
-        id: 'perm_overclock',
-        name: 'Circuito de Overclock Extremo',
-        icon: '⚡',
-        cost: 100000,
-        reqMakitas: 30000,
-        reqUpgrade: 'perm_empunhadura',
-        desc: 'Sinergia amplificada: Cliques manuais geram 10% do MPS atual instantaneamente.',
-        purchased: false
-    },
-    {
-        id: 'perm_nanobots',
-        name: 'Enxame de Nanobots Montadores',
-        icon: '🔬',
-        cost: 250000,
-        reqMakitas: 80000,
-        reqUpgrade: 'perm_ia_maker',
-        desc: 'Construção a nível molecular. +75% de bônus em todas as oficinas.',
-        purchased: false
-    },
-    {
-        id: 'perm_singularidade',
-        name: 'Núcleo de Singularidade Maker',
-        icon: '🌌',
-        cost: 1000000,
-        reqMakitas: 300000,
-        reqUpgrade: 'perm_nanobots',
-        desc: 'Dobra e meia (+150%) o MPS total e triplica o poder de clique base.',
-        purchased: false
-    },
-    {
-        id: 'perm_plasma_cutter',
-        name: 'Cortador a Plasma Estelar',
-        icon: '✨',
-        cost: 5000000,
-        reqMakitas: 1500000,
-        reqUpgrade: 'perm_titanio',
-        desc: 'Corte por jato térmico cósmico. +25.0 de poder a cada clique manual.',
-        purchased: false
-    },
-    {
-        id: 'perm_fusao_fria',
-        name: 'Reator de Fusão Fria Compacta',
-        icon: '🧪',
-        cost: 20000000,
-        reqMakitas: 6000000,
-        reqUpgrade: 'perm_singularidade',
-        desc: 'Energia infinita limpa. +100% de produção passiva global permanente.',
-        purchased: false
-    },
-    {
-        id: 'perm_hiperconducao',
-        name: 'Hipercondutores de Grafeno',
-        icon: '⚡',
-        cost: 80000000,
-        reqMakitas: 25000000,
-        reqUpgrade: 'perm_fusao_fria',
-        desc: 'Zero resistência elétrica. Triplica a eficiência base de todas as oficinas.',
-        purchased: false
-    },
-    {
-        id: 'perm_sinergia_quantica',
-        name: 'Sinergia Quântica de Impacto',
-        icon: '🔮',
-        cost: 300000000,
-        reqMakitas: 100000000,
-        reqUpgrade: 'perm_overclock',
-        desc: 'Ressonância subatômica: Cada clique manual gera 20% do MPS atual!',
-        purchased: false
-    },
-    {
-        id: 'perm_laser_gama',
-        name: 'Emissor Laser de Raios Gama',
-        icon: '🌠',
-        cost: 1200000000,
-        reqMakitas: 400000000,
-        reqUpgrade: 'perm_plasma_cutter',
-        desc: 'Feixe de altíssima frequência. Adiciona +200.0 de poder de clique base.',
-        purchased: false
-    },
-    {
-        id: 'perm_taquions',
-        name: 'Reator de Táquions Espacial',
-        icon: '⏳',
-        cost: 5000000000,
-        reqMakitas: 1500000000,
-        reqUpgrade: 'perm_hiperconducao',
-        desc: 'Dobra a velocidade da linha temporal: +200% de produção global passiva.',
-        purchased: false
-    },
-    {
-        id: 'perm_materia_escura',
-        name: 'Condensador de Matéria Escura',
-        icon: '🌑',
-        cost: 20000000000,
-        reqMakitas: 6000000000,
-        reqUpgrade: 'perm_taquions',
-        desc: 'Colheita da substância que move o cosmos: +300% de produção global passiva.',
-        purchased: false
-    },
-    {
-        id: 'perm_hiper_clique',
-        name: 'Martelo de Fótons Subatômico',
-        icon: '🔨',
-        cost: 50000000000,
-        reqMakitas: 15000000000,
-        reqUpgrade: 'perm_laser_gama',
-        desc: 'Multiplica todo o poder de clique manual por 10x!',
-        purchased: false
-    },
-    {
-        id: 'perm_onipotencia_maker',
-        name: 'Onipotência Maker Cósmica',
-        icon: '👑',
-        cost: 99000000000,
-        reqMakitas: 35000000000,
-        reqUpgrade: 'perm_materia_escura',
-        desc: 'Atinge a perfeição maker: +500% MPS global, quadruplica oficinas e +30% MPS por clique!',
-        purchased: false
-    }
-];
+// ---------- ÁRVORE DE HABILIDADES PERMANENTES (DERIVADA DO GAME-CONFIG.JSON) ----------
+const permanentUpgrades = (gameConfig.skillTree || gameConfig.permanentUpgrades || []).map(p => ({
+    id: p.id,
+    name: p.name,
+    icon: p.icon || '⚡',
+    cost: Number(p.cost) || 0,
+    reqMakitas: Number(p.reqMakitas ?? p.req ?? 0),
+    reqUpgrade: p.reqUpgrade ?? p.parent ?? null,
+    desc: p.desc || '',
+    effects: p.effects || {},
+    purchased: false
+}));
 
 // Dicionário para busca O(1) de melhorias permanentes (elimina .find() repetitivo)
 const permById = {};
@@ -417,35 +214,50 @@ function calculateLocalMps() {
     });
 
     let workshopMult = 1.0;
-    if (permById.perm_motor_brushless?.purchased) workshopMult *= 2.0;
-    if (permById.perm_hiperconducao?.purchased) workshopMult *= 3.0;
-    if (permById.perm_onipotencia_maker?.purchased) workshopMult *= 4.0;
-    baseMps *= workshopMult;
+    let globalMpsAdd = 0.0;
 
-    let mult = 1.0;
-    if (permById.perm_lubrificante?.purchased) mult += 0.10;
-    if (permById.perm_refrigeracao?.purchased) mult += 0.20;
-    if (permById.perm_bateria_litio?.purchased) mult += 0.25;
-    if (permById.perm_ia_maker?.purchased) mult += 0.50;
-    if (permById.perm_nanobots?.purchased) mult += 0.75;
-    if (permById.perm_fusao_fria?.purchased) mult += 1.00;
-    if (permById.perm_singularidade?.purchased) mult += 1.50;
-    if (permById.perm_taquions?.purchased) mult += 2.00;
-    if (permById.perm_materia_escura?.purchased) mult += 3.00;
-    if (permById.perm_onipotencia_maker?.purchased) mult += 5.00;
+    permanentUpgrades.forEach(p => {
+        if (p.purchased && p.effects) {
+            if (typeof p.effects.multWorkshopMps === 'number') {
+                workshopMult *= p.effects.multWorkshopMps;
+            }
+            if (typeof p.effects.addGlobalMpsPercent === 'number') {
+                globalMpsAdd += p.effects.addGlobalMpsPercent;
+            }
+        }
+    });
 
-    return baseMps * mult;
+    return baseMps * workshopMult * (1.0 + globalMpsAdd);
 }
 
 function calculateLocalClickPower() {
-    let power = 1.0;
-    if (permById.perm_disco_diamante?.purchased) power += 1.0;
-    if (permById.perm_titanio?.purchased) power += 3.0;
-    if (permById.perm_plasma_cutter?.purchased) power += 25.0;
-    if (permById.perm_laser_gama?.purchased) power += 200.0;
-    if (permById.perm_singularidade?.purchased) power *= 3.0;
-    if (permById.perm_hiper_clique?.purchased) power *= 10.0;
-    return power;
+    let basePower = 1.0;
+    let clickMult = 1.0;
+
+    permanentUpgrades.forEach(p => {
+        if (p.purchased && p.effects) {
+            if (typeof p.effects.addClickPower === 'number') {
+                basePower += p.effects.addClickPower;
+            }
+            if (typeof p.effects.multClickPower === 'number') {
+                clickMult *= p.effects.multClickPower;
+            }
+        }
+    });
+
+    return basePower * clickMult;
+}
+
+function getClickSynergyPct() {
+    let maxSynergy = 0.0;
+    permanentUpgrades.forEach(p => {
+        if (p.purchased && p.effects && typeof p.effects.clickSynergyMpsPercent === 'number') {
+            if (p.effects.clickSynergyMpsPercent > maxSynergy) {
+                maxSynergy = p.effects.clickSynergyMpsPercent;
+            }
+        }
+    });
+    return maxSynergy;
 }
 
 function unitCost(upgrade, count) {
@@ -770,17 +582,7 @@ function renderStats() {
     }
 
     let clickPower = calculateLocalClickPower() || 1.0;
-    
-    let synergyPct = 0;
-    if (permById.perm_onipotencia_maker?.purchased) {
-        synergyPct = 0.30;
-    } else if (permById.perm_sinergia_quantica?.purchased) {
-        synergyPct = 0.20;
-    } else if (permById.perm_overclock?.purchased) {
-        synergyPct = 0.10;
-    } else if (permById.perm_empunhadura?.purchased) {
-        synergyPct = 0.05;
-    }
+    const synergyPct = getClickSynergyPct();
 
     if (statClickPowerEl) {
         if (synergyPct > 0) {
@@ -806,8 +608,8 @@ function renderStats() {
         statPermCountEl.textContent = `${purchasedCount}/${permanentUpgrades.length}`;
     }
 
-    // Meta 99B
-    const goalTotal = 99000000000;
+    // Meta Lendária
+    const goalTotal = GOAL_MAKITAS;
     const currentProgress = Math.max(makitas, totalMakitasMade);
     const pct = Math.min(100, (currentProgress / goalTotal) * 100);
 
@@ -929,14 +731,9 @@ function playClickFeedback(gain) {
 
 makitaBtn.addEventListener('click', () => {
     let gain = calculateLocalClickPower();
-    if (permById.perm_onipotencia_maker?.purchased) {
-        gain += (mps * 0.30);
-    } else if (permById.perm_sinergia_quantica?.purchased) {
-        gain += (mps * 0.20);
-    } else if (permById.perm_overclock?.purchased) {
-        gain += (mps * 0.10);
-    } else if (permById.perm_empunhadura?.purchased) {
-        gain += (mps * 0.05);
+    const synergyPct = getClickSynergyPct();
+    if (synergyPct > 0) {
+        gain += (mps * synergyPct);
     }
 
     makitas += gain;
@@ -1062,8 +859,7 @@ function applyServerState(data) {
         latestTopPlayer = data.topPlayer;
     }
     if (data.hardwareOwner) {
-        latestHardwareOwner = data.hardwareOwner;
-        updateHardwareUI();
+        setLatestHardwareOwner(data.hardwareOwner);
     }
 
     latestServerData = data;
@@ -1314,6 +1110,18 @@ function formatHardwareTime(sec) {
     return `${String(m).padStart(2, '0')}:${String(rem).padStart(2, '0')}`;
 }
 
+function setLatestHardwareOwner(owner) {
+    if (!owner) return;
+    const curTime = Math.max(latestHardwareOwner?.claimedAt || 0, latestHardwareOwner?.releasedAt || 0);
+    const newTime = Math.max(owner.claimedAt || 0, owner.releasedAt || 0);
+    // Blindagem de consistência eventual: se o pacote recebido tem timestamp anterior ao que já temos, ignora!
+    if (newTime > 0 && curTime > 0 && newTime < curTime) {
+        return;
+    }
+    latestHardwareOwner = owner;
+    updateHardwareUI();
+}
+
 function updateHardwareUI() {
     if (statHardwareOwnerEl) {
         if (latestHardwareOwner && latestHardwareOwner.active && latestHardwareOwner.remainingSec > 0) {
@@ -1412,8 +1220,7 @@ async function claimHardware(force = false) {
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
 
         if (data.hardwareOwner) {
-            latestHardwareOwner = data.hardwareOwner;
-            updateHardwareUI();
+            setLatestHardwareOwner(data.hardwareOwner);
             closeHardwareBusyModal();
             showFloatText('🎮 Console Físico Vinculado!');
         }
@@ -1440,8 +1247,7 @@ async function releaseHardware() {
         });
         const data = await res.json();
         if (data.hardwareOwner) {
-            latestHardwareOwner = data.hardwareOwner;
-            updateHardwareUI();
+            setLatestHardwareOwner(data.hardwareOwner);
             showFloatText('🔓 Console Liberado!');
         }
     } catch (e) {
@@ -1528,8 +1334,7 @@ async function openProfileModal() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         if (data.hardwareOwner) {
-            latestHardwareOwner = data.hardwareOwner;
-            updateHardwareUI();
+            setLatestHardwareOwner(data.hardwareOwner);
         }
         renderProfileList(data.users || []);
     } catch (e) {
@@ -1629,8 +1434,7 @@ async function fetchUserProfileState(userId) {
             latestTopPlayer = data.topPlayer;
         }
         if (data.hardwareOwner) {
-            latestHardwareOwner = data.hardwareOwner;
-            updateHardwareUI();
+            setLatestHardwareOwner(data.hardwareOwner);
         }
         hasUnsavedChanges = false;
         updateSaveIndicator();
@@ -1704,8 +1508,7 @@ async function saveUserProgressToCloud(isManual = false) {
             latestTopPlayer = data.topPlayer;
         }
         if (data && data.hardwareOwner) {
-            latestHardwareOwner = data.hardwareOwner;
-            updateHardwareUI();
+            setLatestHardwareOwner(data.hardwareOwner);
         }
 
         saveLocalState();
@@ -1976,8 +1779,7 @@ function initGame() {
                 if (res.ok) {
                     const data = await res.json();
                     if (data.hardwareOwner) {
-                        latestHardwareOwner = data.hardwareOwner;
-                        updateHardwareUI();
+                        setLatestHardwareOwner(data.hardwareOwner);
                     }
                     if (data.topPlayer) {
                         latestTopPlayer = data.topPlayer;

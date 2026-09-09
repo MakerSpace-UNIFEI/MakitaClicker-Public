@@ -4,63 +4,23 @@
 // Master de Estado + Sincronização Inteligente (Cloud Master / Client Slave)
 // =====================================================================
 
+import gameConfig from './game-config.json' with { type: 'json' };
+
 const KV_KEY = 'gamestate';
 const USERS_LIST_KEY = 'users:list';
-const MAX_OWNED = 100;
+const MAX_OWNED = gameConfig.meta?.maxOwnedPerUpgrade || 100;
 // Hash SHA-256 criptográfico de 'ADMIN_PASSWORD' para autenticação segura e irreversível no painel administrativo
 const ADMIN_AUTH_HASH = 'c9a2abd67ad59717195e5d8a6f917ba5084d81af244b0a8d40c8b30f234742d7';
 
-// Configuração das 24 oficinas (idêntico ao ESP e Web)
-const UPGRADES = [
-  { id: 'upgrade1',          baseCost: 10,           growth: 1.10, mps: 0.1 },
-  { id: 'upgrade_1mps',      baseCost: 100,          growth: 1.12, mps: 1.0 },
-  { id: 'upgrade_2mps',      baseCost: 250,          growth: 1.12, mps: 2.0 },
-  { id: 'upgrade_5mps',      baseCost: 750,          growth: 1.13, mps: 5.0 },
-  { id: 'upgrade_10mps',     baseCost: 1800,         growth: 1.13, mps: 10.0 },
-  { id: 'upgrade_15mps',     baseCost: 3500,         growth: 1.14, mps: 15.0 },
-  { id: 'upgrade_20mps',     baseCost: 6000,         growth: 1.14, mps: 20.0 },
-  { id: 'upgrade_25mps',     baseCost: 10000,        growth: 1.14, mps: 25.0 },
-  { id: 'upgrade_30mps',     baseCost: 16000,        growth: 1.15, mps: 30.0 },
-  { id: 'upgrade_50mps',     baseCost: 35000,        growth: 1.15, mps: 50.0 },
-  { id: 'upgrade_100mps',    baseCost: 100000,       growth: 1.15, mps: 100.0 },
-  { id: 'upgrade_200mps',    baseCost: 300000,       growth: 1.16, mps: 200.0 },
-  { id: 'upgrade_500mps',    baseCost: 1000000,      growth: 1.16, mps: 500.0 },
-  { id: 'upgrade_1200mps',   baseCost: 3500000,      growth: 1.16, mps: 1200.0 },
-  { id: 'upgrade_3000mps',   baseCost: 12000000,     growth: 1.16, mps: 3000.0 },
-  { id: 'upgrade_8000mps',   baseCost: 40000000,     growth: 1.17, mps: 8000.0 },
-  { id: 'upgrade_20kmps',    baseCost: 150000000,    growth: 1.17, mps: 20000.0 },
-  { id: 'upgrade_60kmps',    baseCost: 500000000,    growth: 1.17, mps: 60000.0 },
-  { id: 'upgrade_180kmps',   baseCost: 1800000000,   growth: 1.17, mps: 180000.0 },
-  { id: 'upgrade_500kmps',   baseCost: 6000000000,   growth: 1.18, mps: 500000.0 },
-  { id: 'upgrade_1500kmps',  baseCost: 20000000000,  growth: 1.18, mps: 1500000.0 },
-  { id: 'upgrade_5000kmps',  baseCost: 60000000000,  growth: 1.18, mps: 5000000.0 },
-  { id: 'upgrade_15000kmps', baseCost: 200000000000, growth: 1.19, mps: 15000000.0 },
-  { id: 'upgrade_50000kmps', baseCost: 800000000000, growth: 1.19, mps: 50000000.0 }
-];
-
-// Configuração das 20 tecnologias permanentes (Skill Tree)
-const PERMANENT_UPGRADES = [
-  { id: 'perm_lubrificante', cost: 25, req: 10, parent: null },
-  { id: 'perm_disco_diamante', cost: 100, req: 50, parent: 'perm_lubrificante' },
-  { id: 'perm_motor_brushless', cost: 300, req: 150, parent: 'perm_lubrificante' },
-  { id: 'perm_empunhadura', cost: 600, req: 250, parent: 'perm_disco_diamante' },
-  { id: 'perm_bateria_litio', cost: 1500, req: 600, parent: 'perm_motor_brushless' },
-  { id: 'perm_ia_maker', cost: 5000, req: 2000, parent: 'perm_bateria_litio' },
-  { id: 'perm_refrigeracao', cost: 15000, req: 6000, parent: 'perm_motor_brushless' },
-  { id: 'perm_titanio', cost: 35000, req: 12000, parent: 'perm_disco_diamante' },
-  { id: 'perm_overclock', cost: 100000, req: 30000, parent: 'perm_empunhadura' },
-  { id: 'perm_nanobots', cost: 250000, req: 80000, parent: 'perm_ia_maker' },
-  { id: 'perm_singularidade', cost: 1000000, req: 300000, parent: 'perm_nanobots' },
-  { id: 'perm_plasma_cutter', cost: 5000000, req: 1500000, parent: 'perm_titanio' },
-  { id: 'perm_fusao_fria', cost: 20000000, req: 6000000, parent: 'perm_singularidade' },
-  { id: 'perm_hiperconducao', cost: 80000000, req: 25000000, parent: 'perm_fusao_fria' },
-  { id: 'perm_sinergia_quantica', cost: 300000000, req: 100000000, parent: 'perm_overclock' },
-  { id: 'perm_laser_gama', cost: 1200000000, req: 400000000, parent: 'perm_plasma_cutter' },
-  { id: 'perm_taquions', cost: 5000000000, req: 1500000000, parent: 'perm_hiperconducao' },
-  { id: 'perm_materia_escura', cost: 20000000000, req: 6000000000, parent: 'perm_taquions' },
-  { id: 'perm_hiper_clique', cost: 50000000000, req: 15000000000, parent: 'perm_laser_gama' },
-  { id: 'perm_onipotencia_maker', cost: 99000000000, req: 35000000000, parent: 'perm_materia_escura' }
-];
+// Configuração das oficinas e tecnologias derivadas de game-config.json
+const UPGRADES = gameConfig.upgrades;
+const PERMANENT_UPGRADES = (gameConfig.skillTree || gameConfig.permanentUpgrades || []).map(p => ({
+  id: p.id,
+  cost: Number(p.cost) || 0,
+  req: Number(p.req ?? p.reqMakitas ?? 0),
+  parent: p.parent ?? p.reqUpgrade ?? null,
+  effects: p.effects || {}
+}));
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -96,6 +56,7 @@ function getDefaultState() {
     resetPendingEsp: false,
     hardwareOrders: [], // Fila latente FIFO de ordens para o hardware ESP8266
     lastResetAckAt: 0,
+    lastResetExecutedAt: 0, // Timestamp da última ordem de reset concluída/confirmada
     espTelemetry: null,
     lastUpdate: Date.now()
   };
@@ -106,14 +67,21 @@ function unitCost(upgrade, count) {
 }
 
 function calculateClickPower(perms) {
-  let power = 1.0;
-  if (perms?.perm_disco_diamante) power += 1.0;
-  if (perms?.perm_titanio) power += 3.0;
-  if (perms?.perm_plasma_cutter) power += 25.0;
-  if (perms?.perm_laser_gama) power += 200.0;
-  if (perms?.perm_singularidade) power *= 3.0;
-  if (perms?.perm_hiper_clique) power *= 10.0;
-  return power;
+  let basePower = 1.0;
+  let clickMult = 1.0;
+
+  PERMANENT_UPGRADES.forEach(p => {
+    if (perms?.[p.id] && p.effects) {
+      if (typeof p.effects.addClickPower === 'number') {
+        basePower += p.effects.addClickPower;
+      }
+      if (typeof p.effects.multClickPower === 'number') {
+        clickMult *= p.effects.multClickPower;
+      }
+    }
+  });
+
+  return basePower * clickMult;
 }
 
 function calculateMps(owned, perms) {
@@ -123,38 +91,33 @@ function calculateMps(owned, perms) {
   });
 
   let workshopMultiplier = 1.0;
-  if (perms?.perm_motor_brushless) workshopMultiplier *= 2.0;
-  if (perms?.perm_hiperconducao) workshopMultiplier *= 3.0;
-  if (perms?.perm_onipotencia_maker) workshopMultiplier *= 4.0;
-  baseMps *= workshopMultiplier;
+  let globalMpsAddPercent = 0.0;
 
-  let multiplier = 1.0;
-  if (perms?.perm_lubrificante) multiplier += 0.10;
-  if (perms?.perm_refrigeracao) multiplier += 0.20;
-  if (perms?.perm_bateria_litio) multiplier += 0.25;
-  if (perms?.perm_ia_maker) multiplier += 0.50;
-  if (perms?.perm_nanobots) multiplier += 0.75;
-  if (perms?.perm_fusao_fria) multiplier += 1.00;
-  if (perms?.perm_singularidade) multiplier += 1.50;
-  if (perms?.perm_taquions) multiplier += 2.00;
-  if (perms?.perm_materia_escura) multiplier += 3.00;
-  if (perms?.perm_onipotencia_maker) multiplier += 5.00;
+  PERMANENT_UPGRADES.forEach(p => {
+    if (perms?.[p.id] && p.effects) {
+      if (typeof p.effects.multWorkshopMps === 'number') {
+        workshopMultiplier *= p.effects.multWorkshopMps;
+      }
+      if (typeof p.effects.addGlobalMpsPercent === 'number') {
+        globalMpsAddPercent += p.effects.addGlobalMpsPercent;
+      }
+    }
+  });
 
-  return baseMps * multiplier;
+  return baseMps * workshopMultiplier * (1.0 + globalMpsAddPercent);
 }
 
 function getSingleClickGain(perms, mps) {
-  let gain = calculateClickPower(perms);
-  if (perms?.perm_onipotencia_maker) {
-    gain += (mps * 0.30);
-  } else if (perms?.perm_sinergia_quantica) {
-    gain += (mps * 0.20);
-  } else if (perms?.perm_overclock) {
-    gain += (mps * 0.10);
-  } else if (perms?.perm_empunhadura) {
-    gain += (mps * 0.05);
-  }
-  return gain;
+  const baseGain = calculateClickPower(perms);
+  let maxSynergy = 0.0;
+  PERMANENT_UPGRADES.forEach(p => {
+    if (perms?.[p.id] && p.effects && typeof p.effects.clickSynergyMpsPercent === 'number') {
+      if (p.effects.clickSynergyMpsPercent > maxSynergy) {
+        maxSynergy = p.effects.clickSynergyMpsPercent;
+      }
+    }
+  });
+  return baseGain + (mps * maxSynergy);
 }
 
 function getTotalOwned(owned) {
@@ -423,39 +386,78 @@ async function saveState(env, state) {
 
 async function loadHardwareLease(env) {
   const { kv } = getKV(env);
-  let lease = null;
+  let kvLease = null;
   if (kv) {
     try {
-      lease = await kv.get(HARDWARE_LEASE_KEY, { type: 'json' });
+      kvLease = await kv.get(HARDWARE_LEASE_KEY, { type: 'json' });
     } catch (err) {
       console.error('[KV] Erro ao ler hardware lease:', err);
     }
   }
-  if (!lease) {
-    lease = memoryFallbackHardwareLease;
+
+  // Reconciliação Temporal com Cache em Memória:
+  // Se o cache de memória possuir versão com timestamp superior (claimedAt ou releasedAt),
+  // ele prevalece para evitar regressões causadas por consistência eventual do Cloudflare KV.
+  let lease = kvLease;
+  if (memoryFallbackHardwareLease) {
+    const memTimestamp = Math.max(memoryFallbackHardwareLease.claimedAt || 0, memoryFallbackHardwareLease.releasedAt || 0);
+    const kvTimestamp = Math.max(kvLease?.claimedAt || 0, kvLease?.releasedAt || 0);
+    if (memTimestamp >= kvTimestamp) {
+      lease = memoryFallbackHardwareLease;
+    }
   }
 
-  if (lease && typeof lease === 'object' && lease.userId) {
-    const now = Date.now();
-    if (lease.expiresAt && lease.expiresAt > now) {
+  const now = Date.now();
+  if (lease && typeof lease === 'object') {
+    const isUnexpired = lease.expiresAt && lease.expiresAt > now;
+    if (lease.active !== false && lease.userId && isUnexpired) {
       return {
         ...lease,
         active: true,
         remainingSec: Math.max(0, Math.ceil((lease.expiresAt - now) / 1000))
       };
     }
+    return {
+      active: false,
+      userId: null,
+      userName: null,
+      claimedAt: lease.claimedAt || 0,
+      releasedAt: lease.releasedAt || 0,
+      expiresAt: 0,
+      remainingSec: 0
+    };
   }
-  return { active: false, userId: null, userName: null, expiresAt: 0, remainingSec: 0 };
+  return { active: false, userId: null, userName: null, claimedAt: 0, releasedAt: 0, expiresAt: 0, remainingSec: 0 };
 }
 
 async function saveHardwareLease(env, lease) {
+  const currentMem = memoryFallbackHardwareLease;
+  // Guarda sempre o lease com maior timestamp temporal
+  if (currentMem && lease) {
+    const curTime = Math.max(currentMem.claimedAt || 0, currentMem.releasedAt || 0);
+    const newTime = Math.max(lease.claimedAt || 0, lease.releasedAt || 0);
+    if (curTime > newTime) {
+      // Tentativa de escrita com timestamp inferior: ignora para proteger contra eventual consistency
+      return;
+    }
+  }
+
   const { kv } = getKV(env);
   if (kv) {
     try {
       if (lease) {
         await kv.put(HARDWARE_LEASE_KEY, JSON.stringify(lease));
       } else {
-        await kv.delete(HARDWARE_LEASE_KEY);
+        const tombstone = {
+          active: false,
+          userId: null,
+          userName: null,
+          claimedAt: currentMem?.claimedAt || 0,
+          releasedAt: Date.now(),
+          expiresAt: 0,
+          remainingSec: 0
+        };
+        await kv.put(HARDWARE_LEASE_KEY, JSON.stringify(tombstone));
       }
     } catch (err) {
       console.error('[KV] Erro ao salvar hardware lease:', err);
@@ -607,12 +609,13 @@ export async function onRequestPost(context) {
       });
     }
 
-    // Cria ou renova o lease por 3 minutos
+    // Garante timestamp estritamente monotônico para blindagem contra consistência eventual do KV
+    const monotonicClaimedAt = Math.max(now, (currentLease?.claimedAt || 0) + 1, (currentLease?.releasedAt || 0) + 1);
     const newLease = {
       userId,
       userName,
-      claimedAt: now,
-      expiresAt: now + HARDWARE_LEASE_MS,
+      claimedAt: monotonicClaimedAt,
+      expiresAt: monotonicClaimedAt + HARDWARE_LEASE_MS,
       leaseId: (currentLease?.leaseId || 0) + 1
     };
 
@@ -923,14 +926,26 @@ export async function onRequestPost(context) {
     const { state: curState } = await loadState(env);
     curState.hardwareOrders = Array.isArray(curState.hardwareOrders) ? curState.hardwareOrders : [];
 
-    const orderId = 'ord_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+    const now = Date.now();
+    const orderId = 'ord_' + now + '_' + Math.random().toString(36).slice(2, 6);
     const orderType = body.orderType || 'factory_reset'; // 'factory_reset' (Reset Real: limpa LittleFS + regrava firmware via OTA) ou 'reset' (limpa jogo)
+
+    // SUPERSESSÃO TEMPORAL DE RESET:
+    // Se emitimos um reset agora (ex: 3:50), ordens de reset criadas anteriormente (ex: 3:30)
+    // são completamente redundantes e obsoletas, pois este novo reset reinicializa todo o estado.
+    // Descartamos ordens anteriores de reset da fila para evitar reboots e formatações duplicadas.
+    curState.hardwareOrders = curState.hardwareOrders.filter(o => {
+      if ((o.type === 'reset' || o.type === 'factory_reset') && o.createdAt <= now) {
+        return false;
+      }
+      return true;
+    });
 
     const order = {
       id: orderId,
       type: orderType,
       target: 'esp',
-      createdAt: Date.now(),
+      createdAt: now,
       description: orderType === 'factory_reset'
         ? 'Reset Real: Limpeza da Flash LittleFS e Regravação de Firmware via OTA'
         : 'Reset Simples de Jogo: Limpeza de variáveis e saldo'
@@ -938,8 +953,9 @@ export async function onRequestPost(context) {
 
     curState.hardwareOrders.push(order);
     curState.resetPendingEsp = true;
-    curState.lastUpdate = Date.now();
-    curState.lastKvSave = Date.now();
+    curState.lastResetOrderAt = now;
+    curState.lastUpdate = now;
+    curState.lastKvSave = now;
     await saveState(env, curState);
 
     return new Response(JSON.stringify({
@@ -1002,10 +1018,18 @@ export async function onRequestPost(context) {
       dequeued = curState.hardwareOrders.shift();
     }
 
+    const orderTime = dequeued?.createdAt || Date.now();
+    curState.lastResetExecutedAt = Math.max(curState.lastResetExecutedAt || 0, orderTime);
+    curState.lastResetAckAt = Date.now();
+
+    // Remove também quaisquer ordens antigas remanescentes cujo createdAt <= curState.lastResetExecutedAt
+    if (curState.lastResetExecutedAt) {
+      curState.hardwareOrders = curState.hardwareOrders.filter(o => o.createdAt > curState.lastResetExecutedAt);
+    }
+
     if (curState.hardwareOrders.length === 0) {
       curState.resetPendingEsp = false;
     }
-    curState.lastResetAckAt = Date.now();
     curState.lastUpdate = Date.now();
     await saveState(env, curState);
 
@@ -1014,6 +1038,7 @@ export async function onRequestPost(context) {
       dequeued,
       queueLength: curState.hardwareOrders.length,
       hardwareOrders: curState.hardwareOrders,
+      lastResetExecutedAt: curState.lastResetExecutedAt,
       nextOrder: curState.hardwareOrders[0] || null,
       _kv_connected: kvConnected,
       _kv_binding: kvName || 'NONE'
@@ -1088,15 +1113,27 @@ export async function onRequestPost(context) {
     // 1. Processamento de Confirmação (ACK) enviado pela ESP
     const ackOrderId = body.ackOrderId;
     if (ackOrderId || body.resetAck === true) {
+      let dequeued = null;
       if (ackOrderId) {
+        const found = state.hardwareOrders.find(o => o.id === ackOrderId);
+        if (found) dequeued = found;
         state.hardwareOrders = state.hardwareOrders.filter(o => o.id !== ackOrderId);
       } else if (state.hardwareOrders.length > 0) {
-        state.hardwareOrders.shift();
+        dequeued = state.hardwareOrders.shift();
       }
+
+      const orderTime = dequeued?.createdAt || now;
+      state.lastResetExecutedAt = Math.max(state.lastResetExecutedAt || 0, orderTime);
+      state.lastResetAckAt = now;
+
+      // Purga quaisquer ordens residuais obsoletas cujo createdAt <= state.lastResetExecutedAt
+      if (state.lastResetExecutedAt) {
+        state.hardwareOrders = state.hardwareOrders.filter(o => o.createdAt > state.lastResetExecutedAt);
+      }
+
       if (state.hardwareOrders.length === 0) {
         state.resetPendingEsp = false;
       }
-      state.lastResetAckAt = now;
       state.makitas = 0.0;
       state.totalMakitasMade = 0.0;
       state.owned = {};
@@ -1115,13 +1152,19 @@ export async function onRequestPost(context) {
       freeHeap: typeof body.freeHeap === 'number' ? body.freeHeap : (state.espTelemetry?.freeHeap || 0)
     };
 
-    // 2. Se houver ordens latentes pendentes na fila, envia a mais antiga (FIFO) para a ESP
+    // 2. Descarta ordens obsoletas da fila cujo createdAt <= state.lastResetExecutedAt
+    if (state.lastResetExecutedAt) {
+      state.hardwareOrders = state.hardwareOrders.filter(o => o.createdAt > state.lastResetExecutedAt);
+    }
+
+    // 3. Se houver ordens latentes pendentes na fila, envia a mais antiga (FIFO) para a ESP
     const activeOrder = state.hardwareOrders.length > 0 ? state.hardwareOrders[0] : null;
     if (activeOrder) {
       await saveState(env, state);
       return new Response(JSON.stringify({
         resetOrder: true,
         pendingOrder: activeOrder,
+        lastResetExecutedAt: state.lastResetExecutedAt || 0,
         queueLength: state.hardwareOrders.length,
         topPlayer,
         hardwareOwner,
@@ -1133,15 +1176,6 @@ export async function onRequestPost(context) {
         headers: CORS_HEADERS
       });
     }
-
-    state.espTelemetry = {
-      lastPing: now,
-      fwVersion: typeof body.fwVersion === 'number' ? body.fwVersion : (state.espTelemetry?.fwVersion || 0),
-      ip: typeof body.ip === 'string' ? body.ip : (state.espTelemetry?.ip || 'desconhecido'),
-      rssi: typeof body.rssi === 'number' ? body.rssi : (state.espTelemetry?.rssi || null),
-      uptime: typeof body.uptime === 'number' ? body.uptime : (state.espTelemetry?.uptime || 0),
-      freeHeap: typeof body.freeHeap === 'number' ? body.freeHeap : (state.espTelemetry?.freeHeap || 0)
-    };
 
     // Roteamento dinâmico de cliques e dados da ESP8266:
     // Se houver dono ativo do console físico, credita e sincroniza com o perfil do dono.
@@ -1190,6 +1224,7 @@ export async function onRequestPost(context) {
         clickPower: targetState.clickPower || 1,
         topPlayer,
         hardwareOwner,
+        lastResetExecutedAt: state.lastResetExecutedAt || 0,
         resetOrder: false,
         _kv_connected: kvConnected,
         _kv_binding: kvName || 'NONE',

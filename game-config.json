@@ -1,0 +1,321 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "MakitaClicker Game Configuration",
+  "version": "1.0.0",
+  "meta": {
+    "title": "Makita Clicker · MakerSpace UNIFEI",
+    "goalMakitas": 99000000000,
+    "maxOwnedPerUpgrade": 100
+  },
+  "upgrades": [
+    { "id": "upgrade1",          "name": "Bancada Básica",                 "icon": "⚙️",  "baseCost": 10,           "growth": 1.10, "mps": 0.1 },
+    { "id": "upgrade_1mps",      "name": "Esmerilhadeira Manual",           "icon": "🪚",  "baseCost": 100,          "growth": 1.12, "mps": 1.0 },
+    { "id": "upgrade_2mps",      "name": "Serra Mármore 1400W",            "icon": "⚡",  "baseCost": 250,          "growth": 1.12, "mps": 2.0 },
+    { "id": "upgrade_5mps",      "name": "Torno Mecânico",                 "icon": "🔧",  "baseCost": 750,          "growth": 1.13, "mps": 5.0 },
+    { "id": "upgrade_10mps",     "name": "Fresadora CNC",                  "icon": "🎛️", "baseCost": 1800,         "growth": 1.13, "mps": 10.0 },
+    { "id": "upgrade_15mps",     "name": "Robô de Solda Industrial",        "icon": "🦾",  "baseCost": 3500,         "growth": 1.14, "mps": 15.0 },
+    { "id": "upgrade_20mps",     "name": "Cortadora a Laser CO2",          "icon": "🔴",  "baseCost": 6000,         "growth": 1.14, "mps": 20.0 },
+    { "id": "upgrade_25mps",     "name": "Prensa Hidráulica 50T",           "icon": "🏗️", "baseCost": 10000,        "growth": 1.14, "mps": 25.0 },
+    { "id": "upgrade_30mps",     "name": "Impressora 3D de Metal",         "icon": "🖨️", "baseCost": 16000,        "growth": 1.15, "mps": 30.0 },
+    { "id": "upgrade_50mps",     "name": "Linha de Montagem IA",           "icon": "🤖",  "baseCost": 35000,        "growth": 1.15, "mps": 50.0 },
+    { "id": "upgrade_100mps",    "name": "Mega Fábrica Makita",            "icon": "🏭",  "baseCost": 100000,       "growth": 1.15, "mps": 100.0 },
+    { "id": "upgrade_200mps",    "name": "Reator de Fusão Maker",          "icon": "☢️",  "baseCost": 300000,       "growth": 1.16, "mps": 200.0 },
+    { "id": "upgrade_500mps",    "name": "Estação Espacial Orbital",        "icon": "🛸",  "baseCost": 1000000,      "growth": 1.16, "mps": 500.0 },
+    { "id": "upgrade_1200mps",   "name": "Acelerador de Partículas",       "icon": "🌀",  "baseCost": 3500000,      "growth": 1.16, "mps": 1200.0 },
+    { "id": "upgrade_3000mps",   "name": "Mineração de Asteroides",        "icon": "☄️",  "baseCost": 12000000,     "growth": 1.16, "mps": 3000.0 },
+    { "id": "upgrade_8000mps",   "name": "Usina Vulcânica Maker",          "icon": "🌋",  "baseCost": 40000000,     "growth": 1.17, "mps": 8000.0 },
+    { "id": "upgrade_20kmps",    "name": "Forja de Antimatéria",            "icon": "⚛️",  "baseCost": 150000000,    "growth": 1.17, "mps": 20000.0 },
+    { "id": "upgrade_60kmps",    "name": "Computador Quântico UNIFEI",     "icon": "💻",  "baseCost": 500000000,    "growth": 1.17, "mps": 60000.0 },
+    { "id": "upgrade_180kmps",   "name": "Esfera de Dyson Makita",         "icon": "☀️",  "baseCost": 1800000000,   "growth": 1.17, "mps": 180000.0 },
+    { "id": "upgrade_500kmps",   "name": "Portal Dimensional Maker",       "icon": "🌌",  "baseCost": 6000000000,   "growth": 1.18, "mps": 500000.0 },
+    { "id": "upgrade_1500kmps",  "name": "Manipulador Gravitacional",      "icon": "🪐",  "baseCost": 20000000000,  "growth": 1.18, "mps": 1500000.0 },
+    { "id": "upgrade_5000kmps",  "name": "Motor de Dobra Espacial",        "icon": "🚀",  "baseCost": 60000000000,  "growth": 1.18, "mps": 5000000.0 },
+    { "id": "upgrade_15000kmps", "name": "Fábrica de Realidade Paralela",   "icon": "🔮",  "baseCost": 200000000000, "growth": 1.19, "mps": 15000000.0 },
+    { "id": "upgrade_50000kmps", "name": "Big Bang Maker Contínuo",        "icon": "💥",  "baseCost": 800000000000, "growth": 1.19, "mps": 50000000.0 }
+  ],
+  "skillTree": [
+    {
+      "id": "perm_lubrificante",
+      "name": "Óleo Sintético Premium",
+      "icon": "🛢️",
+      "cost": 25,
+      "req": 10,
+      "reqMakitas": 10,
+      "parent": null,
+      "reqUpgrade": null,
+      "desc": "Reduz o atrito dos motores. Aumenta a velocidade de fabricação em +10%.",
+      "effects": {
+        "addGlobalMpsPercent": 0.10
+      }
+    },
+    {
+      "id": "perm_disco_diamante",
+      "name": "Disco Diamantado Reforçado",
+      "icon": "💠",
+      "cost": 100,
+      "req": 50,
+      "reqMakitas": 50,
+      "parent": "perm_lubrificante",
+      "reqUpgrade": "perm_lubrificante",
+      "desc": "Cortes ultra afiados. Aumenta o poder de clique manual em +1 por clique.",
+      "effects": {
+        "addClickPower": 1.0
+      }
+    },
+    {
+      "id": "perm_motor_brushless",
+      "name": "Motor Brushless Industrial",
+      "icon": "⚡",
+      "cost": 300,
+      "req": 150,
+      "reqMakitas": 150,
+      "parent": "perm_lubrificante",
+      "reqUpgrade": "perm_lubrificante",
+      "desc": "Motores sem escova de alta eficiência. Dobra o ganho base de todas as oficinas.",
+      "effects": {
+        "multWorkshopMps": 2.0
+      }
+    },
+    {
+      "id": "perm_empunhadura",
+      "name": "Empunhadura Ergonômica Pro",
+      "icon": "🧤",
+      "cost": 600,
+      "req": 250,
+      "reqMakitas": 250,
+      "parent": "perm_disco_diamante",
+      "reqUpgrade": "perm_disco_diamante",
+      "desc": "Menor fadiga ao operar. Cliques manuais geram 5% do MPS atual instantaneamente.",
+      "effects": {
+        "clickSynergyMpsPercent": 0.05
+      }
+    },
+    {
+      "id": "perm_bateria_litio",
+      "name": "Bateria Makita 40V Max XGT",
+      "icon": "🔋",
+      "cost": 1500,
+      "req": 600,
+      "reqMakitas": 600,
+      "parent": "perm_motor_brushless",
+      "reqUpgrade": "perm_motor_brushless",
+      "desc": "Alimentação contínua de lítio. +25% de produção permanente em todas as fontes.",
+      "effects": {
+        "addGlobalMpsPercent": 0.25
+      }
+    },
+    {
+      "id": "perm_ia_maker",
+      "name": "MakerBot Autônomo com IA",
+      "icon": "🤖",
+      "cost": 5000,
+      "req": 2000,
+      "reqMakitas": 2000,
+      "parent": "perm_bateria_litio",
+      "reqUpgrade": "perm_bateria_litio",
+      "desc": "Automação inteligente de fabricação. Aumenta a produção global em +50%.",
+      "effects": {
+        "addGlobalMpsPercent": 0.50
+      }
+    },
+    {
+      "id": "perm_refrigeracao",
+      "name": "Sistema Criogênico de Nitrogênio",
+      "icon": "❄️",
+      "cost": 15000,
+      "req": 6000,
+      "reqMakitas": 6000,
+      "parent": "perm_motor_brushless",
+      "reqUpgrade": "perm_motor_brushless",
+      "desc": "Resfriamento ultra rápido. +20% na velocidade global de produção.",
+      "effects": {
+        "addGlobalMpsPercent": 0.20
+      }
+    },
+    {
+      "id": "perm_titanio",
+      "name": "Lâmina de Titânio Forjada a Plasma",
+      "icon": "🗡️",
+      "cost": 35000,
+      "req": 12000,
+      "reqMakitas": 12000,
+      "parent": "perm_disco_diamante",
+      "reqUpgrade": "perm_disco_diamante",
+      "desc": "Dureza atômica. Adiciona +3.0 de poder a cada clique manual.",
+      "effects": {
+        "addClickPower": 3.0
+      }
+    },
+    {
+      "id": "perm_overclock",
+      "name": "Circuito de Overclock Extremo",
+      "icon": "⚡",
+      "cost": 100000,
+      "req": 30000,
+      "reqMakitas": 30000,
+      "parent": "perm_empunhadura",
+      "reqUpgrade": "perm_empunhadura",
+      "desc": "Sinergia amplificada: Cliques manuais geram 10% do MPS atual instantaneamente.",
+      "effects": {
+        "clickSynergyMpsPercent": 0.10
+      }
+    },
+    {
+      "id": "perm_nanobots",
+      "name": "Enxame de Nanobots Montadores",
+      "icon": "🔬",
+      "cost": 250000,
+      "req": 80000,
+      "reqMakitas": 80000,
+      "parent": "perm_ia_maker",
+      "reqUpgrade": "perm_ia_maker",
+      "desc": "Construção a nível molecular. +75% de bônus em todas as oficinas.",
+      "effects": {
+        "addGlobalMpsPercent": 0.75
+      }
+    },
+    {
+      "id": "perm_singularidade",
+      "name": "Núcleo de Singularidade Maker",
+      "icon": "🌌",
+      "cost": 1000000,
+      "req": 300000,
+      "reqMakitas": 300000,
+      "parent": "perm_nanobots",
+      "reqUpgrade": "perm_nanobots",
+      "desc": "Dobra e meia (+150%) o MPS total e triplica o poder de clique base.",
+      "effects": {
+        "addGlobalMpsPercent": 1.50,
+        "multClickPower": 3.0
+      }
+    },
+    {
+      "id": "perm_plasma_cutter",
+      "name": "Cortador a Plasma Estelar",
+      "icon": "✨",
+      "cost": 5000000,
+      "req": 1500000,
+      "reqMakitas": 1500000,
+      "parent": "perm_titanio",
+      "reqUpgrade": "perm_titanio",
+      "desc": "Corte por jato térmico cósmico. +25.0 de poder a cada clique manual.",
+      "effects": {
+        "addClickPower": 25.0
+      }
+    },
+    {
+      "id": "perm_fusao_fria",
+      "name": "Reator de Fusão Fria Compacta",
+      "icon": "🧪",
+      "cost": 20000000,
+      "req": 6000000,
+      "reqMakitas": 6000000,
+      "parent": "perm_singularidade",
+      "reqUpgrade": "perm_singularidade",
+      "desc": "Energia infinita limpa. +100% de produção passiva global permanente.",
+      "effects": {
+        "addGlobalMpsPercent": 1.00
+      }
+    },
+    {
+      "id": "perm_hiperconducao",
+      "name": "Hipercondutores de Grafeno",
+      "icon": "⚡",
+      "cost": 80000000,
+      "req": 25000000,
+      "reqMakitas": 25000000,
+      "parent": "perm_fusao_fria",
+      "reqUpgrade": "perm_fusao_fria",
+      "desc": "Zero resistência elétrica. Triplica a eficiência base de todas as oficinas.",
+      "effects": {
+        "multWorkshopMps": 3.0
+      }
+    },
+    {
+      "id": "perm_sinergia_quantica",
+      "name": "Sinergia Quântica de Impacto",
+      "icon": "🔮",
+      "cost": 300000000,
+      "req": 100000000,
+      "reqMakitas": 100000000,
+      "parent": "perm_overclock",
+      "reqUpgrade": "perm_overclock",
+      "desc": "Ressonância subatômica: Cada clique manual gera 20% do MPS atual!",
+      "effects": {
+        "clickSynergyMpsPercent": 0.20
+      }
+    },
+    {
+      "id": "perm_laser_gama",
+      "name": "Emissor Laser de Raios Gama",
+      "icon": "🌠",
+      "cost": 1200000000,
+      "req": 400000000,
+      "reqMakitas": 400000000,
+      "parent": "perm_plasma_cutter",
+      "reqUpgrade": "perm_plasma_cutter",
+      "desc": "Feixe de altíssima frequência. Adiciona +200.0 de poder de clique base.",
+      "effects": {
+        "addClickPower": 200.0
+      }
+    },
+    {
+      "id": "perm_taquions",
+      "name": "Reator de Táquions Espacial",
+      "icon": "⏳",
+      "cost": 5000000000,
+      "req": 1500000000,
+      "reqMakitas": 1500000000,
+      "parent": "perm_hiperconducao",
+      "reqUpgrade": "perm_hiperconducao",
+      "desc": "Dobra a velocidade da linha temporal: +200% de produção global passiva.",
+      "effects": {
+        "addGlobalMpsPercent": 2.00
+      }
+    },
+    {
+      "id": "perm_materia_escura",
+      "name": "Condensador de Matéria Escura",
+      "icon": "🌑",
+      "cost": 20000000000,
+      "req": 6000000000,
+      "reqMakitas": 6000000000,
+      "parent": "perm_taquions",
+      "reqUpgrade": "perm_taquions",
+      "desc": "Colheita da substância que move o cosmos: +300% de produção global passiva.",
+      "effects": {
+        "addGlobalMpsPercent": 3.00
+      }
+    },
+    {
+      "id": "perm_hiper_clique",
+      "name": "Martelo de Fótons Subatômico",
+      "icon": "🔨",
+      "cost": 50000000000,
+      "req": 15000000000,
+      "reqMakitas": 15000000000,
+      "parent": "perm_laser_gama",
+      "reqUpgrade": "perm_laser_gama",
+      "desc": "Multiplica todo o poder de clique manual por 10x!",
+      "effects": {
+        "multClickPower": 10.0
+      }
+    },
+    {
+      "id": "perm_onipotencia_maker",
+      "name": "Onipotência Maker Cósmica",
+      "icon": "👑",
+      "cost": 99000000000,
+      "req": 35000000000,
+      "reqMakitas": 35000000000,
+      "parent": "perm_materia_escura",
+      "reqUpgrade": "perm_materia_escura",
+      "desc": "Atinge a perfeição maker: +500% MPS global, quadruplica oficinas e +30% MPS por clique!",
+      "effects": {
+        "addGlobalMpsPercent": 5.00,
+        "multWorkshopMps": 4.0,
+        "clickSynergyMpsPercent": 0.30
+      }
+    }
+  ]
+}

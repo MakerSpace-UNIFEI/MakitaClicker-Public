@@ -48,15 +48,11 @@ O projeto é um jogo incremental (Cookie Clicker) **híbrido** (Físico + Web).
 
 ## 🛠️ 3. Como Adicionar Funcionalidades (Playbook)
 
-### Adicionar uma Nova Oficina (Loja)
-As configurações devem estar espelhadas em três lugares. Não esqueça de nenhum!
-1. **Frontend (`web/game.js`):** Adicione no array `upgrades` (nome, custo base, mps base).
-2. **Backend (`functions/api/state.js`):** Adicione no array `UPGRADES` (cost, mps, nome) para garantir que o servidor valide compras.
-3. **Firmware (`firmware/codigo_esp/codigo_esp.ino`):** Adicione na struct `UPGRADE_CONFIGS` para que a ESP calcule corretamente a produção passiva offline/local.
-
-### Adicionar uma Habilidade (Skill Tree Permanentes)
-1. Defina o nó no array `PERMANENT_UPGRADES` em `functions/api/state.js` e em `web/game.js`. Você precisará de: `id`, `name`, `req` (meta acumulada exigida) e `parent` (ID do pré-requisito).
-2. Se a habilidade altera os multiplicadores físicos do hardware, vá até `firmware/codigo_esp/codigo_esp.ino` na função `recalculateStats()` e leia o ID correspondente da string que chega do JSON na sincronização HTTPS.
+### Adicionar ou Modificar uma Oficina (Loja) ou Habilidade (Skill Tree)
+O arquivo central configurável é o `game-config.json` na raiz do repositório. Ele é adicionado no build ao site e compartilhado automaticamente entre Frontend (`web/`) e Backend (`functions/api/`):
+1. **Configuração Unificada (`game-config.json`):** Adicione ou altere o item no array `upgrades` (loja) ou `skillTree` (habilidades com requisitos, custos e `effects` dinâmicos).
+2. **Firmware (`firmware/codigo_esp/codigo_esp.ino`):** Se a oficina ou habilidade afetar os multiplicadores físicos do hardware autônomo, espelhe na struct `UPGRADE_CONFIGS` ou na função `recalculateStats()` para a produção passiva offline do chip.
+3. **Build e Sincronização:** O comando `npm run build` (ou `npm run dev`) sincroniza automaticamente o `game-config.json` para `dist/game-config.json`, `web/game-config.json` e `functions/api/game-config.json`.
 
 ### Modificar o Handshake de Reset
 O reset é bidirecional para evitar ressurreição de dados offline antigos.

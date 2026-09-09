@@ -89,6 +89,8 @@ bool hardwareOwnerActive = false;
 String hardwareOwnerName = "";
 unsigned long hardwareOwnerExpiresAtMillis = 0;
 String currentTargetUserId = "";
+uint64_t lastHardwareOwnerClaimedAt = 0; // Timestamp estrito para blindagem contra consistência eventual do KV
+uint64_t lastExecutedResetTimestamp = 0; // Timestamp do último reset executado (evita reexecuções obsoletas)
 
 // Protótipos de funções de rede, ACK e OTA
 bool enviarAckOrdem(const char* orderId);
@@ -419,6 +421,9 @@ void loadLocalGameState() {
   }
 
   if (doc.containsKey("makitas")) makitas = doc["makitas"].as<double>();
+  if (doc.containsKey("lastExecutedResetTimestamp")) {
+    lastExecutedResetTimestamp = doc["lastExecutedResetTimestamp"].as<uint64_t>();
+  }
   if (doc.containsKey("owned")) {
     JsonObject ownedObj = doc["owned"].as<JsonObject>();
     for (int i = 0; i < NUM_UPGRADES; i++) {
@@ -463,6 +468,7 @@ void saveLocalGameState() {
   DynamicJsonDocument doc(2048);
 #endif
   doc["makitas"] = makitas;
+  doc["lastExecutedResetTimestamp"] = lastExecutedResetTimestamp;
 
   JsonObject ownedObj = doc["owned"].to<JsonObject>();
   for (int i = 0; i < NUM_UPGRADES; i++) {
@@ -562,6 +568,14 @@ void syncWithCloud() {
     DeserializationError err = deserializeJson(doc, responsePayload);
 
     if (!err) {
+      // Sincroniza o timestamp do último reset executado registrado na nuvem
+      if (doc.containsKey("lastResetExecutedAt")) {
+        uint64_t srvReset = doc["lastResetExecutedAt"].as<uint64_t>();
+        if (srvReset > lastExecutedResetTimestamp) {
+          lastExecutedResetTimestamp = srvReset;
+        }
+      }
+
       // 0. TRATAMENTO DA FILA DE ORDENS LATENTES VINDA DA NUVEM:
       bool resetOrder = doc["resetOrder"] | false;
       JsonObject orderObj;
@@ -574,85 +588,103 @@ void syncWithCloud() {
       if (resetOrder || hasOrderObj) {
         const char* orderId = hasOrderObj ? (orderObj["id"] | "") : "legacy";
         const char* orderType = hasOrderObj ? (orderObj["type"] | "reset") : "reset";
-        Serial.printf("[ORDEM] Ordem latente recebida da nuvem! ID=%s | Tipo=%s\n", orderId, orderType);
+        uint64_t orderCreatedAt = 0;
+        if (hasOrderObj && orderObj.containsKey("createdAt")) {
+          orderCreatedAt = orderObj["createdAt"].as<uint64_t>();
+        }
+        Serial.printf("[ORDEM] Ordem latente recebida da nuvem! ID=%s | Tipo=%s | CriadaEm=%llu\n",
+                      orderId, orderType, (unsigned long long)orderCreatedAt);
 
-        if (strcmp(orderType, "factory_reset") == 0) {
-          // -------------------------------------------------------------
-          // RESET REAL: ZERA MEMÓRIA FLASH E REGRAVA FIRMWARE VIA OTA
-          // -------------------------------------------------------------
-          Serial.println(F("[RESET_REAL] Executando Reset Real: Limpeza da Flash LittleFS e Regravacao OTA..."));
-          statusAtual = "Reset Real";
-          precisaAtualizarLCD = true;
-          atualizarLCD();
-
-          if (lcd) {
-            lcd->clear();
-            for (int i = 0; i < 4; i++) prevLcdLines[i][0] = '\0';
-            printLinhaFormatada(0, "====================");
-            printLinhaFormatada(1, "   RESET REAL ESP   ");
-            printLinhaFormatada(2, "Limpando Flash FS...");
-            printLinhaFormatada(3, "Enviando ACK...     ");
+        // VERIFICAÇÃO TEMPORAL DE RESET (PROTEÇÃO CONTRA CONSISTÊNCIA EVENTUAL):
+        // Se a ordem foi criada em timestamp anterior ou igual ao último reset já executado,
+        // ela é considerada obsoleta / já concluída (ex: reset emitido às 3:30 após um reset de 3:50).
+        if (orderCreatedAt > 0 && lastExecutedResetTimestamp > 0 && orderCreatedAt <= lastExecutedResetTimestamp) {
+          Serial.printf("[ORDEM] Ordem ID=%s IGNORADA por antiguidade (%llu <= ultimoReset: %llu). ACK de descarte enviado.\n",
+                        orderId, (unsigned long long)orderCreatedAt, (unsigned long long)lastExecutedResetTimestamp);
+          enviarAckOrdem(orderId);
+        } else {
+          if (orderCreatedAt > 0) {
+            lastExecutedResetTimestamp = orderCreatedAt;
           }
 
-          // 1. Zera todas as variáveis em RAM
-          makitas = 0.0;
-          pendingPhysicalClicks = 0;
-          for (int i = 0; i < NUM_UPGRADES; i++) ownedUpgrades[i] = 0;
-          permLubrificante = permDiscoDiamante = permMotorBrushless = permEmpunhadura = false;
-          permBateriaLitio = permIaMaker = permRefrigeracao = permTitanio = false;
-          permOverclock = permNanobots = permSingularidade = permPlasmaCutter = false;
-          permFusaoFria = permHiperconducao = permSinergiaQuantica = permLaserGama = false;
-          permTaquions = permMateriaEscura = permHiperClique = permOnipotenciaMaker = false;
-          recalculateStats();
+          if (strcmp(orderType, "factory_reset") == 0) {
+            // -------------------------------------------------------------
+            // RESET REAL: ZERA MEMÓRIA FLASH E REGRAVA FIRMWARE VIA OTA
+            // -------------------------------------------------------------
+            Serial.println(F("[RESET_REAL] Executando Reset Real: Limpeza da Flash LittleFS e Regravacao OTA..."));
+            statusAtual = "Reset Real";
+            precisaAtualizarLCD = true;
+            atualizarLCD();
 
-          // 2. Apaga arquivos locais e formata partição flash LittleFS
-          LittleFS.remove(GAMESTATE_FILE);
-          LittleFS.format();
-          isFlashDirty = false;
+            if (lcd) {
+              lcd->clear();
+              for (int i = 0; i < 4; i++) prevLcdLines[i][0] = '\0';
+              printLinhaFormatada(0, "====================");
+              printLinhaFormatada(1, "   RESET REAL ESP   ");
+              printLinhaFormatada(2, "Limpando Flash FS...");
+              printLinhaFormatada(3, "Enviando ACK...     ");
+            }
 
-          // 3. Encerra conexões ativas
-          http.end();
-          client.stop();
+            // 1. Zera todas as variáveis em RAM
+            makitas = 0.0;
+            pendingPhysicalClicks = 0;
+            for (int i = 0; i < NUM_UPGRADES; i++) ownedUpgrades[i] = 0;
+            permLubrificante = permDiscoDiamante = permMotorBrushless = permEmpunhadura = false;
+            permBateriaLitio = permIaMaker = permRefrigeracao = permTitanio = false;
+            permOverclock = permNanobots = permSingularidade = permPlasmaCutter = false;
+            permFusaoFria = permHiperconducao = permSinergiaQuantica = permLaserGama = false;
+            permTaquions = permMateriaEscura = permHiperClique = permOnipotenciaMaker = false;
+            recalculateStats();
 
-          // 4. Envia confirmação de ACK para retirar da fila no servidor antes de regravar
-          enviarAckOrdem(orderId);
+            // 2. Apaga arquivos locais e formata partição flash LittleFS
+            LittleFS.remove(GAMESTATE_FILE);
+            LittleFS.format();
+            isFlashDirty = false;
 
-          // 5. Força download e regravação completa do firmware via OTA com reboot automático
-          forcarRegravacaoOTA();
-          return;
-        } else {
-          // -------------------------------------------------------------
-          // RESET SIMPLES DE JOGO: LIMPA VARIÁVEIS E SALVA ESTADO ZERADO
-          // -------------------------------------------------------------
-          Serial.println(F("[RESET] Executando reset simples de variaveis..."));
-          statusAtual = "Apagando...";
-          precisaAtualizarLCD = true;
-          atualizarLCD();
+            // 3. Encerra conexões ativas
+            http.end();
+            client.stop();
 
-          makitas = 0.0;
-          pendingPhysicalClicks = 0;
-          for (int i = 0; i < NUM_UPGRADES; i++) ownedUpgrades[i] = 0;
-          permLubrificante = permDiscoDiamante = permMotorBrushless = permEmpunhadura = false;
-          permBateriaLitio = permIaMaker = permRefrigeracao = permTitanio = false;
-          permOverclock = permNanobots = permSingularidade = permPlasmaCutter = false;
-          permFusaoFria = permHiperconducao = permSinergiaQuantica = permLaserGama = false;
-          permTaquions = permMateriaEscura = permHiperClique = permOnipotenciaMaker = false;
-          recalculateStats();
-          saveLocalGameState();
-          isFlashDirty = false;
+            // 4. Envia confirmação de ACK para retirar da fila no servidor antes de regravar
+            enviarAckOrdem(orderId);
 
-          http.end();
-          client.stop();
+            // 5. Força download e regravação completa do firmware via OTA com reboot automático
+            forcarRegravacaoOTA();
+            return;
+          } else {
+            // -------------------------------------------------------------
+            // RESET SIMPLES DE JOGO: LIMPA VARIÁVEIS E SALVA ESTADO ZERADO
+            // -------------------------------------------------------------
+            Serial.println(F("[RESET] Executando reset simples de variaveis..."));
+            statusAtual = "Apagando...";
+            precisaAtualizarLCD = true;
+            atualizarLCD();
 
-          // Envia confirmação (ACK) para a nuvem
-          enviarAckOrdem(orderId);
+            makitas = 0.0;
+            pendingPhysicalClicks = 0;
+            for (int i = 0; i < NUM_UPGRADES; i++) ownedUpgrades[i] = 0;
+            permLubrificante = permDiscoDiamante = permMotorBrushless = permEmpunhadura = false;
+            permBateriaLitio = permIaMaker = permRefrigeracao = permTitanio = false;
+            permOverclock = permNanobots = permSingularidade = permPlasmaCutter = false;
+            permFusaoFria = permHiperconducao = permSinergiaQuantica = permLaserGama = false;
+            permTaquions = permMateriaEscura = permHiperClique = permOnipotenciaMaker = false;
+            recalculateStats();
+            saveLocalGameState();
+            isFlashDirty = false;
 
-          statusAtual = "Reset OK!";
-          precisaAtualizarLCD = true;
-          atualizarLCD();
+            http.end();
+            client.stop();
 
-          forceCloudSync = true;
-          return;
+            // Envia confirmação (ACK) para a nuvem
+            enviarAckOrdem(orderId);
+
+            statusAtual = "Reset OK!";
+            precisaAtualizarLCD = true;
+            atualizarLCD();
+
+            forceCloudSync = true;
+            return;
+          }
         }
       }
 
@@ -670,141 +702,161 @@ void syncWithCloud() {
         }
       }
 
-      // 2. CONTROLE DE POSSE DO CONSOLE FÍSICO (HARDWARE OWNER):
+      // 2. CONTROLE DE POSSE DO CONSOLE FÍSICO (HARDWARE OWNER COM PROTEÇÃO TEMPORAL CONTRA KV EVENTUAL):
+      bool isStaleOwnerPayload = false;
       if (doc["hardwareOwner"].is<JsonObject>()) {
         JsonObject hObj = doc["hardwareOwner"];
         bool active = hObj["active"] | false;
-        if (active) {
-          hardwareOwnerActive = true;
-          hardwareOwnerName = String((const char*)(hObj["userName"] | "Maker"));
-          unsigned long remSec = hObj["remainingSec"] | 0;
-          hardwareOwnerExpiresAtMillis = millis() + (remSec * 1000UL);
+        uint64_t remoteClaimedAt = 0;
+        if (hObj.containsKey("claimedAt")) {
+          remoteClaimedAt = hObj["claimedAt"].as<uint64_t>();
+        }
+
+        // Blindagem contra consistência eventual do Cloudflare KV:
+        // Se o timestamp claimedAt for anterior ao que já conhecemos (ex: recebemos pacote de 1:22
+        // mas o console já está no dono de 1:24), descarta completamente o pacote obsoleto!
+        if (remoteClaimedAt > 0 && lastHardwareOwnerClaimedAt > 0 && remoteClaimedAt < lastHardwareOwnerClaimedAt) {
+          Serial.printf("[OWNER] Rejeitando proprietario obsoleto do KV (recebido: %llu < atual: %llu)\n",
+                        (unsigned long long)remoteClaimedAt, (unsigned long long)lastHardwareOwnerClaimedAt);
+          isStaleOwnerPayload = true;
         } else {
-          hardwareOwnerActive = false;
+          if (remoteClaimedAt >= lastHardwareOwnerClaimedAt) {
+            lastHardwareOwnerClaimedAt = remoteClaimedAt;
+          }
+          if (active) {
+            hardwareOwnerActive = true;
+            hardwareOwnerName = String((const char*)(hObj["userName"] | "Maker"));
+            unsigned long remSec = hObj["remainingSec"] | 0;
+            hardwareOwnerExpiresAtMillis = millis() + (remSec * 1000UL);
+          } else {
+            hardwareOwnerActive = false;
+          }
         }
       }
 
       // 3. ADOÇÃO OU RECONCILIAÇÃO DO USUÁRIO-ALVO (OWNER OU TOP PLAYER):
-      const char* rawTarget = doc["targetUserId"] | "";
-      String newTarget = String(rawTarget);
-      bool targetChanged = (newTarget.length() > 0 && newTarget != currentTargetUserId);
-      if (targetChanged) {
-        currentTargetUserId = newTarget;
-        Serial.printf("[TARGET] Alvo do console alterado para: %s\n", newTarget.c_str());
-        if (doc.containsKey("makitas")) {
-          makitas = doc["makitas"].as<double>();
-        }
-        for (int i = 0; i < NUM_UPGRADES; i++) {
-          ownedUpgrades[i] = 0;
-        }
-        if (doc.containsKey("owned")) {
-          JsonObject ownedObj = doc["owned"].as<JsonObject>();
-          for (int i = 0; i < NUM_UPGRADES; i++) {
-            if (ownedObj.containsKey(UPGRADE_CONFIGS[i].id)) {
-              ownedUpgrades[i] = ownedObj[UPGRADE_CONFIGS[i].id].as<int>();
-            }
+      if (!isStaleOwnerPayload) {
+        const char* rawTarget = doc["targetUserId"] | "";
+        String newTarget = String(rawTarget);
+        bool targetChanged = (newTarget.length() > 0 && newTarget != currentTargetUserId);
+        if (targetChanged) {
+          currentTargetUserId = newTarget;
+          Serial.printf("[TARGET] Alvo do console alterado para: %s\n", newTarget.c_str());
+          if (doc.containsKey("makitas")) {
+            makitas = doc["makitas"].as<double>();
           }
-        }
-        permLubrificante = false;
-        permDiscoDiamante = false;
-        permMotorBrushless = false;
-        permEmpunhadura = false;
-        permBateriaLitio = false;
-        permIaMaker = false;
-        permRefrigeracao = false;
-        permTitanio = false;
-        permOverclock = false;
-        permNanobots = false;
-        permSingularidade = false;
-        permPlasmaCutter = false;
-        permFusaoFria = false;
-        permHiperconducao = false;
-        permSinergiaQuantica = false;
-        permLaserGama = false;
-        permTaquions = false;
-        permMateriaEscura = false;
-        permHiperClique = false;
-        permOnipotenciaMaker = false;
-        if (doc.containsKey("perms")) {
-          JsonObject permsObj = doc["perms"].as<JsonObject>();
-          permLubrificante = permsObj["perm_lubrificante"] | false;
-          permDiscoDiamante = permsObj["perm_disco_diamante"] | false;
-          permMotorBrushless = permsObj["perm_motor_brushless"] | false;
-          permEmpunhadura = permsObj["perm_empunhadura"] | false;
-          permBateriaLitio = permsObj["perm_bateria_litio"] | false;
-          permIaMaker = permsObj["perm_ia_maker"] | false;
-          permRefrigeracao = permsObj["perm_refrigeracao"] | false;
-          permTitanio = permsObj["perm_titanio"] | false;
-          permOverclock = permsObj["perm_overclock"] | false;
-          permNanobots = permsObj["perm_nanobots"] | false;
-          permSingularidade = permsObj["perm_singularidade"] | false;
-          permPlasmaCutter = permsObj["perm_plasma_cutter"] | false;
-          permFusaoFria = permsObj["perm_fusao_fria"] | false;
-          permHiperconducao = permsObj["perm_hiperconducao"] | false;
-          permSinergiaQuantica = permsObj["perm_sinergia_quantica"] | false;
-          permLaserGama = permsObj["perm_laser_gama"] | false;
-          permTaquions = permsObj["perm_taquions"] | false;
-          permMateriaEscura = permsObj["perm_materia_escura"] | false;
-          permHiperClique = permsObj["perm_hiper_clique"] | false;
-          permOnipotenciaMaker = permsObj["perm_onipotencia_maker"] | false;
-        }
-        recalculateStats();
-        isFlashDirty = true;
-      } else {
-        // Saldo Monotônico dentro da mesma sessão de jogador
-        if (doc.containsKey("makitas")) {
-          double serverMakitas = doc["makitas"].as<double>();
-          if (serverMakitas > makitas) {
-            makitas = serverMakitas;
-            isFlashDirty = true;
-          }
-        }
-
-        // Upgrades: Mantém maior nível dentro da mesma sessão
-        bool statsChanged = false;
-        if (doc.containsKey("owned")) {
-          JsonObject ownedObj = doc["owned"].as<JsonObject>();
           for (int i = 0; i < NUM_UPGRADES; i++) {
-            if (ownedObj.containsKey(UPGRADE_CONFIGS[i].id)) {
-              int serverVal = ownedObj[UPGRADE_CONFIGS[i].id].as<int>();
-              if (serverVal > ownedUpgrades[i]) {
-                ownedUpgrades[i] = serverVal;
-                statsChanged = true;
-                isFlashDirty = true;
+            ownedUpgrades[i] = 0;
+          }
+          if (doc.containsKey("owned")) {
+            JsonObject ownedObj = doc["owned"].as<JsonObject>();
+            for (int i = 0; i < NUM_UPGRADES; i++) {
+              if (ownedObj.containsKey(UPGRADE_CONFIGS[i].id)) {
+                ownedUpgrades[i] = ownedObj[UPGRADE_CONFIGS[i].id].as<int>();
               }
             }
           }
-        }
-
-        // Tecnologias Permanentes
-        if (doc.containsKey("perms")) {
-          JsonObject permsObj = doc["perms"].as<JsonObject>();
-          #define CHECK_PERM(var, key) if (!var && (permsObj[key] | false)) { var = true; statsChanged = true; isFlashDirty = true; }
-          CHECK_PERM(permLubrificante, "perm_lubrificante");
-          CHECK_PERM(permDiscoDiamante, "perm_disco_diamante");
-          CHECK_PERM(permMotorBrushless, "perm_motor_brushless");
-          CHECK_PERM(permEmpunhadura, "perm_empunhadura");
-          CHECK_PERM(permBateriaLitio, "perm_bateria_litio");
-          CHECK_PERM(permIaMaker, "perm_ia_maker");
-          CHECK_PERM(permRefrigeracao, "perm_refrigeracao");
-          CHECK_PERM(permTitanio, "perm_titanio");
-          CHECK_PERM(permOverclock, "perm_overclock");
-          CHECK_PERM(permNanobots, "perm_nanobots");
-          CHECK_PERM(permSingularidade, "perm_singularidade");
-          CHECK_PERM(permPlasmaCutter, "perm_plasma_cutter");
-          CHECK_PERM(permFusaoFria, "perm_fusao_fria");
-          CHECK_PERM(permHiperconducao, "perm_hiperconducao");
-          CHECK_PERM(permSinergiaQuantica, "perm_sinergia_quantica");
-          CHECK_PERM(permLaserGama, "perm_laser_gama");
-          CHECK_PERM(permTaquions, "perm_taquions");
-          CHECK_PERM(permMateriaEscura, "perm_materia_escura");
-          CHECK_PERM(permHiperClique, "perm_hiper_clique");
-          CHECK_PERM(permOnipotenciaMaker, "perm_onipotencia_maker");
-          #undef CHECK_PERM
-        }
-
-        if (statsChanged) {
+          permLubrificante = false;
+          permDiscoDiamante = false;
+          permMotorBrushless = false;
+          permEmpunhadura = false;
+          permBateriaLitio = false;
+          permIaMaker = false;
+          permRefrigeracao = false;
+          permTitanio = false;
+          permOverclock = false;
+          permNanobots = false;
+          permSingularidade = false;
+          permPlasmaCutter = false;
+          permFusaoFria = false;
+          permHiperconducao = false;
+          permSinergiaQuantica = false;
+          permLaserGama = false;
+          permTaquions = false;
+          permMateriaEscura = false;
+          permHiperClique = false;
+          permOnipotenciaMaker = false;
+          if (doc.containsKey("perms")) {
+            JsonObject permsObj = doc["perms"].as<JsonObject>();
+            permLubrificante = permsObj["perm_lubrificante"] | false;
+            permDiscoDiamante = permsObj["perm_disco_diamante"] | false;
+            permMotorBrushless = permsObj["perm_motor_brushless"] | false;
+            permEmpunhadura = permsObj["perm_empunhadura"] | false;
+            permBateriaLitio = permsObj["perm_bateria_litio"] | false;
+            permIaMaker = permsObj["perm_ia_maker"] | false;
+            permRefrigeracao = permsObj["perm_refrigeracao"] | false;
+            permTitanio = permsObj["perm_titanio"] | false;
+            permOverclock = permsObj["perm_overclock"] | false;
+            permNanobots = permsObj["perm_nanobots"] | false;
+            permSingularidade = permsObj["perm_singularidade"] | false;
+            permPlasmaCutter = permsObj["perm_plasma_cutter"] | false;
+            permFusaoFria = permsObj["perm_fusao_fria"] | false;
+            permHiperconducao = permsObj["perm_hiperconducao"] | false;
+            permSinergiaQuantica = permsObj["perm_sinergia_quantica"] | false;
+            permLaserGama = permsObj["perm_laser_gama"] | false;
+            permTaquions = permsObj["perm_taquions"] | false;
+            permMateriaEscura = permsObj["perm_materia_escura"] | false;
+            permHiperClique = permsObj["perm_hiper_clique"] | false;
+            permOnipotenciaMaker = permsObj["perm_onipotencia_maker"] | false;
+          }
           recalculateStats();
+          isFlashDirty = true;
+        } else {
+          // Saldo Monotônico dentro da mesma sessão de jogador
+          if (doc.containsKey("makitas")) {
+            double serverMakitas = doc["makitas"].as<double>();
+            if (serverMakitas > makitas) {
+              makitas = serverMakitas;
+              isFlashDirty = true;
+            }
+          }
+
+          // Upgrades: Mantém maior nível dentro da mesma sessão
+          bool statsChanged = false;
+          if (doc.containsKey("owned")) {
+            JsonObject ownedObj = doc["owned"].as<JsonObject>();
+            for (int i = 0; i < NUM_UPGRADES; i++) {
+              if (ownedObj.containsKey(UPGRADE_CONFIGS[i].id)) {
+                int serverVal = ownedObj[UPGRADE_CONFIGS[i].id].as<int>();
+                if (serverVal > ownedUpgrades[i]) {
+                  ownedUpgrades[i] = serverVal;
+                  statsChanged = true;
+                  isFlashDirty = true;
+                }
+              }
+            }
+          }
+
+          // Tecnologias Permanentes
+          if (doc.containsKey("perms")) {
+            JsonObject permsObj = doc["perms"].as<JsonObject>();
+            #define CHECK_PERM(var, key) if (!var && (permsObj[key] | false)) { var = true; statsChanged = true; isFlashDirty = true; }
+            CHECK_PERM(permLubrificante, "perm_lubrificante");
+            CHECK_PERM(permDiscoDiamante, "perm_disco_diamante");
+            CHECK_PERM(permMotorBrushless, "perm_motor_brushless");
+            CHECK_PERM(permEmpunhadura, "perm_empunhadura");
+            CHECK_PERM(permBateriaLitio, "perm_bateria_litio");
+            CHECK_PERM(permIaMaker, "perm_ia_maker");
+            CHECK_PERM(permRefrigeracao, "perm_refrigeracao");
+            CHECK_PERM(permTitanio, "perm_titanio");
+            CHECK_PERM(permOverclock, "perm_overclock");
+            CHECK_PERM(permNanobots, "perm_nanobots");
+            CHECK_PERM(permSingularidade, "perm_singularidade");
+            CHECK_PERM(permPlasmaCutter, "perm_plasma_cutter");
+            CHECK_PERM(permFusaoFria, "perm_fusao_fria");
+            CHECK_PERM(permHiperconducao, "perm_hiperconducao");
+            CHECK_PERM(permSinergiaQuantica, "perm_sinergia_quantica");
+            CHECK_PERM(permLaserGama, "perm_laser_gama");
+            CHECK_PERM(permTaquions, "perm_taquions");
+            CHECK_PERM(permMateriaEscura, "perm_materia_escura");
+            CHECK_PERM(permHiperClique, "perm_hiper_clique");
+            CHECK_PERM(permOnipotenciaMaker, "perm_onipotencia_maker");
+            #undef CHECK_PERM
+          }
+
+          if (statsChanged) {
+            recalculateStats();
+          }
         }
       }
 
