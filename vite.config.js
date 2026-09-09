@@ -1,5 +1,5 @@
 import { resolve } from 'path';
-import { readFileSync, copyFileSync } from 'fs';
+import { readFileSync, copyFileSync, existsSync } from 'fs';
 import { execSync } from 'child_process';
 import { defineConfig } from 'vite';
 
@@ -26,18 +26,31 @@ function gameConfigPlugin() {
         source: content
       });
 
+      let versionData = {
+        firmware_version: 0,
+        firmware_url: "https://makitaclicker.pages.dev/firmware.bin",
+        firmware_size: 0,
+        firmware_md5: ""
+      };
+      const versionFile = resolve(import.meta.dirname, 'web/public/version.json');
+      if (existsSync(versionFile)) {
+        try {
+          versionData = JSON.parse(readFileSync(versionFile, 'utf-8'));
+        } catch (e) {}
+      }
+
       let rev = Date.now();
       try {
         rev = parseInt(execSync('git rev-list --count HEAD', { cwd: import.meta.dirname, stdio: ['pipe', 'pipe', 'ignore'] }).toString().trim(), 10) || rev;
       } catch (e) {}
 
+      versionData.web_version = rev;
+      versionData.build_time = Date.now();
+
       this.emitFile({
         type: 'asset',
         fileName: 'version.json',
-        source: JSON.stringify({
-          web_version: rev,
-          build_time: Date.now()
-        }, null, 2)
+        source: JSON.stringify(versionData, null, 2)
       });
     },
     configureServer(server) {
