@@ -62,3 +62,12 @@ O reset é bidirecional para evitar ressurreição de dados offline antigos.
 ## 🚀 4. Desenvolvimento Local
 - **Frontend:** Rode `npm run dev`. O frontend vai detectar o modo local e cortar as requisições HTTPS para simular o jogo offline perfeitamente.
 - **ESP8266:** Só precisa compilar a primeira vez via USB. A placa auto-atualiza o `.bin` via rede a cada push na branch `main`.
+
+## 🌐 5. API de Leitura Pública (Read-All API)
+Como o repositório é privado, está disponível um token de leitura da Cloudflare para que serviços externos e IAs possam inspecionar os dados do banco KV e telemetria:
+
+- **API Token (Read-Only):** Definido via variável `$CF_READ_TOKEN` (chave `cfat_*` de leitura)
+- **Account ID:** `<CLOUDFLARE_ACCOUNT_ID>`
+- **KV Namespace ID (`makita-kv`):** `<SEU_KV_NAMESPACE_ID>`
+- **Documentação Completa:** Consulte [`API_READ_GUIDE.md`](./API_READ_GUIDE.md) para exemplos práticos de chamadas `curl`, Node.js e Python para ler o ranking (`users:list`), estado de usuários (`user:<id>:state`), telemetria do hardware (`hardware:controller`, `gamestate`) e status de deploys do Pages.
+
