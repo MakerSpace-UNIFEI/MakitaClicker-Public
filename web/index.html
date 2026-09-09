@@ -2,15 +2,38 @@
 <html lang="pt-br">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="theme-color" content="#161616">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>Makita Clicker · MakerSpace UNIFEI</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<div class="game">
+
+<!-- Header Sticky Exclusivo Mobile (< 860px) -->
+<header class="mobile-header" id="mobileHeader">
+    <div class="mobile-header__profile">
+        <button class="mobile-profile-btn" id="btnMobileProfile" title="Trocar ou criar perfil">
+            <span class="mobile-profile-avatar">👤</span>
+            <span class="mobile-profile-name" id="mobileProfileName">Perfil</span>
+        </button>
+    </div>
+    <div class="mobile-header__counter">
+        <div class="mobile-counter__digits"><span id="mobileCounter">0</span> <span class="mobile-counter__unit">makitas</span></div>
+        <div class="mobile-counter__rate">+<span id="mobileRate">0</span>/s</div>
+    </div>
+    <div class="mobile-header__actions">
+        <button class="mobile-action-btn mobile-save-btn" id="btnMobileSave" title="Salvar agora na nuvem">
+            <span id="mobileSaveIcon">💾</span>
+        </button>
+    </div>
+</header>
+
+<div class="game" id="gameContainer" data-active-view="clicker">
 
     <!-- ===== Esquerda: Contador + Área de Clique ===== -->
-    <section class="col-counter">
+    <section class="col-counter" id="viewCounter">
         <div class="counter-head">
             <p class="counter-head__title">Oficina de Makitas</p>
             <div>
@@ -25,11 +48,21 @@
                 <span id="makitaFallbackIcon" class="clicker__fallback" style="display:none; font-size: 4rem; user-select: none;">🪚</span>
             </button>
             <p class="click-hint">⚡ Clique para fabricar</p>
+            <div class="mobile-quick-card" id="mobileQuickCard">
+                <div class="mobile-quick-stat">
+                    <span class="mobile-quick-stat__label">Poder por Clique</span>
+                    <span class="mobile-quick-stat__val" id="mobileQuickClickPower">1.0</span>
+                </div>
+                <div class="mobile-quick-stat">
+                    <span class="mobile-quick-stat__label">Meta 99B</span>
+                    <span class="mobile-quick-stat__val" id="mobileQuickGoal">0.00%</span>
+                </div>
+            </div>
         </div>
     </section>
 
     <!-- ===== Centro: Navegação + Abas + Log ===== -->
-    <section class="col-center">
+    <section class="col-center" id="viewCenter">
         <!-- Barra de Perfil e Salve Manual -->
         <div class="profile-bar">
             <div class="profile-info">
@@ -254,7 +287,7 @@
     </section>
 
     <!-- ===== Direita: Loja de Oficinas ===== -->
-    <section class="col-shop">
+    <section class="col-shop" id="viewShop">
         <div class="shop-head">
             <p class="shop-head__title">Loja</p>
         </div>
@@ -270,6 +303,30 @@
     </section>
 
 </div>
+
+<!-- Barra de Navegação Inferior para Mobile (< 860px) -->
+<nav class="mobile-nav" id="mobileNav">
+    <button class="mobile-nav-btn is-active" data-mobile-view="clicker">
+        <span class="mobile-nav-icon">🪚</span>
+        <span class="mobile-nav-label">Oficina</span>
+    </button>
+    <button class="mobile-nav-btn" data-mobile-view="shop">
+        <span class="mobile-nav-icon">🛒</span>
+        <span class="mobile-nav-label">Loja</span>
+    </button>
+    <button class="mobile-nav-btn" data-mobile-view="perms">
+        <span class="mobile-nav-icon">⚡</span>
+        <span class="mobile-nav-label">Árvore</span>
+    </button>
+    <button class="mobile-nav-btn" data-mobile-view="ranking">
+        <span class="mobile-nav-icon">🏆</span>
+        <span class="mobile-nav-label">Ranking</span>
+    </button>
+    <button class="mobile-nav-btn" data-mobile-view="status">
+        <span class="mobile-nav-icon">📡</span>
+        <span class="mobile-nav-label">Status</span>
+    </button>
+</nav>
 
 <!-- Modal de Seleção e Criação de Perfil -->
 <div class="modal-overlay" id="profileModal" style="display: none;">
@@ -289,7 +346,8 @@
         <div class="modal-section">
             <h3 class="modal-section-title">Ou Crie um Novo Perfil</h3>
             <form id="newProfileForm" class="profile-form">
-                <input type="text" id="newProfileInput" class="profile-input" placeholder="Seu nome ou apelido (ex: Victor, Nicolae...)" maxlength="25" autocomplete="off" required>
+                <input type="text" id="newProfileInput" class="profile-input" placeholder="Seu nome ou apelido (ex: Victor, Nicolae...)" maxlength="16" autocomplete="off" required>
+                <small style="display: block; font-size: 0.72rem; color: var(--text-faint); margin-top: 4px;">* Acentos e caracteres especiais são adaptados para compatibilidade com o display LCD da Makita.</small>
                 <button type="submit" class="profile-btn-create" id="btnCreateProfile">Criar Perfil e Jogar 🚀</button>
             </form>
         </div>

@@ -210,15 +210,100 @@ void formatarNumeroBuffer(double num, char* out, size_t outSize) {
   }
 }
 
+// Translitera caracteres UTF-8 e acentuados (ç, º, ª, á, é, etc.) para ASCII puro compatível com display LCD 16x2 / 20x4
+void sanitizarParaLCD(const char* src, char* dst, size_t maxLen) {
+  if (!src || !dst || maxLen == 0) return;
+  size_t outIdx = 0;
+  size_t i = 0;
+
+  while (src[i] != '\0' && outIdx < (maxLen - 1)) {
+    uint8_t c = (uint8_t)src[i];
+
+    if (c == 0xC3) { // Prefixo UTF-8 latino (acentos, ç, etc.)
+      uint8_t c2 = (uint8_t)src[i + 1];
+      if (c2 != '\0') {
+        i += 2;
+        switch (c2) {
+          case 0xA7: dst[outIdx++] = 'c'; break; // ç
+          case 0x87: dst[outIdx++] = 'C'; break; // Ç
+          case 0xA1: case 0xA0: case 0xA2: case 0xA3: case 0xA4: dst[outIdx++] = 'a'; break; // á à â ã ä
+          case 0x81: case 0x80: case 0x82: case 0x83: case 0x84: dst[outIdx++] = 'A'; break; // Á À Â Ã Ä
+          case 0xA9: case 0xAA: case 0xAB: case 0xA8: dst[outIdx++] = 'e'; break; // é ê ë è
+          case 0x89: case 0x8A: case 0x8B: case 0x88: dst[outIdx++] = 'E'; break; // É Ê Ë È
+          case 0xAD: case 0xAC: case 0xAE: case 0xAF: dst[outIdx++] = 'i'; break; // í ì î ï
+          case 0x8D: case 0x8C: case 0x8E: case 0x8F: dst[outIdx++] = 'I'; break; // Í Ì Î Ï
+          case 0xB3: case 0xB2: case 0xB4: case 0xB5: case 0xB6: dst[outIdx++] = 'o'; break; // ó ò ô õ ö
+          case 0x93: case 0x92: case 0x94: case 0x95: case 0x96: dst[outIdx++] = 'O'; break; // Ó Ò Ô Õ Ö
+          case 0xBA: case 0xB9: case 0xBB: case 0xBC: dst[outIdx++] = 'u'; break; // ú ù û ü
+          case 0x9A: case 0x99: case 0x9B: case 0x9C: dst[outIdx++] = 'U'; break; // Ú Ù Û Ü
+          case 0xB1: dst[outIdx++] = 'n'; break; // ñ
+          case 0x91: dst[outIdx++] = 'N'; break; // Ñ
+          default: dst[outIdx++] = ' '; break;
+        }
+        continue;
+      }
+    } else if (c == 0xC2) { // Prefixo UTF-8 ordinal / símbolos
+      uint8_t c2 = (uint8_t)src[i + 1];
+      if (c2 != '\0') {
+        i += 2;
+        switch (c2) {
+          case 0xBA: dst[outIdx++] = 'o'; break; // º
+          case 0xB0: dst[outIdx++] = 'o'; break; // °
+          case 0xAA: dst[outIdx++] = 'a'; break; // ª
+          default: dst[outIdx++] = ' '; break;
+        }
+        continue;
+      }
+    } else if ((c & 0xE0) == 0xC0) { // Sequência genérica de 2 bytes
+      i += 2;
+      dst[outIdx++] = ' ';
+      continue;
+    } else if ((c & 0xF0) == 0xE0) { // Sequência de 3 bytes (símbolos)
+      i += 3;
+      dst[outIdx++] = ' ';
+      continue;
+    } else if ((c & 0xF8) == 0xF0) { // Sequência de 4 bytes (emojis)
+      i += 4;
+      dst[outIdx++] = ' ';
+      continue;
+    } else if (c >= 32 && c <= 126) { // ASCII padrão imprimível
+      dst[outIdx++] = (char)c;
+      i++;
+    } else if (c == 0xE7) { // Latin-1 ç
+      dst[outIdx++] = 'c'; i++;
+    } else if (c == 0xC7) { // Latin-1 Ç
+      dst[outIdx++] = 'C'; i++;
+    } else if (c == 0xBA || c == 0xB0) { // Latin-1 º / °
+      dst[outIdx++] = 'o'; i++;
+    } else if (c == 0xAA) { // Latin-1 ª
+      dst[outIdx++] = 'a'; i++;
+    } else { // Caracteres inválidos ou de controle
+      dst[outIdx++] = ' ';
+      i++;
+    }
+  }
+  dst[outIdx] = '\0';
+}
+
+String sanitizarString(const char* src) {
+  if (!src) return String("Maker");
+  char buf[64];
+  sanitizarParaLCD(src, buf, sizeof(buf));
+  return String(buf);
+}
+
 // Double-buffering sem alocação dinâmica com preenchimento exato de 20 colunas
 void printLinhaFormatada(int linha, const char* texto) {
   if (!lcd || linha < 0 || linha >= 4 || !texto) return;
 
+  char limpo[48];
+  sanitizarParaLCD(texto, limpo, sizeof(limpo));
+
   char formatted[21];
-  size_t len = strlen(texto);
+  size_t len = strlen(limpo);
   if (len > 20) len = 20;
 
-  memcpy(formatted, texto, len);
+  memcpy(formatted, limpo, len);
   for (size_t i = len; i < 20; i++) {
     formatted[i] = ' ';
   }
@@ -714,7 +799,7 @@ void syncWithCloud() {
         JsonObject topObj = doc["topPlayer"];
         const char* tName = topObj["name"] | "";
         if (strlen(tName) > 0) {
-          topPlayerName = String(tName);
+          topPlayerName = sanitizarString(tName);
           topPlayerMakitas = topObj["makitas"] | 0.0;
         }
       }
@@ -742,7 +827,7 @@ void syncWithCloud() {
           }
           if (active) {
             hardwareOwnerActive = true;
-            hardwareOwnerName = String((const char*)(hObj["userName"] | "Maker"));
+            hardwareOwnerName = sanitizarString((const char*)(hObj["userName"] | "Maker"));
             unsigned long remSec = hObj["remainingSec"] | 0;
             hardwareOwnerExpiresAtMillis = millis() + (remSec * 1000UL);
           } else {

@@ -83,7 +83,7 @@ VERSIONJSON
 echo "[VERSION] version.json gerado:"
 cat ./dist/version.json
 
-# 10. Limpeza: Restaura o .ino para manter o git status limpo em builds locais
-git checkout -- firmware/codigo_esp/codigo_esp.ino 2>/dev/null || true
+# 10. Limpeza: Restaura a constante CURRENT_FIRMWARE_VER no .ino para manter o arquivo base limpo
+sed -i "s/#define CURRENT_FIRMWARE_VER .*/#define CURRENT_FIRMWARE_VER 0/" firmware/codigo_esp/codigo_esp.ino
 
 echo "=== Pipeline OTA concluido com sucesso ==="

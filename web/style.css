@@ -15,7 +15,10 @@
     --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
-* { box-sizing: border-box; }
+* {
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
+}
 
 html, body {
     margin: 0;
@@ -29,6 +32,22 @@ body {
     display: flex;
     align-items: stretch;
     justify-content: stretch;
+}
+
+button, .clicker, .shop-item, .navbtn, .mobile-nav-btn, .mobile-profile-btn, .mobile-action-btn {
+    touch-action: manipulation;
+}
+
+.clicker, .click-area, .counter-head, .mobile-header, .mobile-nav {
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+/* Oculta componentes exclusivos de mobile no Desktop */
+.mobile-header,
+.mobile-nav,
+.mobile-quick-card {
+    display: none;
 }
 
 .game {
@@ -746,60 +765,7 @@ button:focus-visible {
     text-align: right;
 }
 
-@media (max-width: 760px) {
-    html, body {
-        height: auto !important;
-        min-height: 100vh !important;
-        overflow-x: hidden !important;
-        overflow-y: auto !important;
-    }
-    .game {
-        height: auto !important;
-        max-height: none !important;
-        display: flex !important;
-        flex-direction: column !important;
-        overflow: visible !important;
-    }
-    .col-counter {
-        height: auto !important;
-        max-height: none !important;
-        overflow: visible !important;
-        border-right: none;
-        border-left: none;
-        border-bottom: 2px solid var(--panel-edge);
-        order: 1;
-    }
-    .click-area {
-        min-height: 250px;
-        padding: 1.5rem 0;
-    }
-    .col-center {
-        height: auto !important;
-        max-height: none !important;
-        overflow: visible !important;
-        border-right: none;
-        border-left: none;
-        border-bottom: 2px solid var(--panel-edge);
-        order: 2;
-    }
-    .center-body {
-        max-height: 60vh;
-        overflow-y: auto !important;
-    }
-    .col-shop {
-        height: auto !important;
-        max-height: none !important;
-        overflow: visible !important;
-        border-right: none;
-        border-left: none;
-        border-bottom: none;
-        order: 3;
-    }
-    .shop-list {
-        max-height: 60vh;
-        overflow-y: auto !important;
-    }
-}
+
 
 @media (prefers-reduced-motion: reduce) {
     .float-plus { animation: none; opacity: 0; }
@@ -1506,4 +1472,460 @@ button:focus-visible {
     color: var(--text-lo);
     line-height: 1.4;
     margin-top: 0.5rem;
+}
+
+/* =====================================================================
+   SISTEMA DE INTERFACE MOBILE RESPONSIVA E NATIVA (< 860px)
+   ===================================================================== */
+
+@media (max-width: 860px) {
+    html, body {
+        height: 100vh;
+        height: 100dvh;
+        overflow: hidden;
+        position: fixed;
+        width: 100%;
+    }
+
+    /* Top Sticky Header */
+    .mobile-header {
+        display: flex;
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: calc(52px + env(safe-area-inset-top, 0px));
+        padding-top: env(safe-area-inset-top, 0px);
+        padding-left: 0.75rem;
+        padding-right: 0.75rem;
+        background: #141414;
+        border-bottom: 1px solid #282828;
+        z-index: 999;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.6);
+    }
+
+    .mobile-header__profile {
+        display: flex;
+        align-items: center;
+        max-width: 34%;
+        flex-shrink: 0;
+    }
+
+    .mobile-profile-btn {
+        background: #1f1f1f;
+        border: 1px solid #333;
+        border-radius: 20px;
+        padding: 0.35rem 0.65rem;
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+        color: var(--text-hi);
+        font-size: 0.75rem;
+        font-weight: 700;
+        cursor: pointer;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 100%;
+        transition: all 0.15s ease;
+    }
+
+    .mobile-profile-btn:active {
+        background: #2a2a2a;
+        transform: scale(0.96);
+    }
+
+    .mobile-profile-avatar {
+        font-size: 0.9rem;
+    }
+
+    .mobile-profile-name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--orange);
+    }
+
+    .mobile-header__counter {
+        flex: 1;
+        text-align: center;
+        min-width: 0;
+    }
+
+    .mobile-counter__digits {
+        font-family: var(--mono);
+        font-size: 1.25rem;
+        font-weight: 800;
+        color: var(--red);
+        line-height: 1.1;
+        text-shadow: 0 0 10px rgba(255, 67, 66, 0.4);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .mobile-counter__unit {
+        font-size: 0.7rem;
+        font-weight: 400;
+        color: var(--text-lo);
+        margin-left: 0.15rem;
+    }
+
+    .mobile-counter__rate {
+        font-family: var(--mono);
+        font-size: 0.7rem;
+        font-weight: 600;
+        color: var(--orange);
+        line-height: 1;
+        margin-top: 0.1rem;
+    }
+
+    .mobile-header__actions {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        flex-shrink: 0;
+    }
+
+    .mobile-action-btn {
+        background: #1f1f1f;
+        border: 1px solid var(--orange-dim);
+        border-radius: 8px;
+        color: var(--orange);
+        width: 36px;
+        height: 36px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        font-size: 1rem;
+        transition: all 0.15s ease;
+    }
+
+    .mobile-action-btn:active {
+        background: #2a2a2a;
+        transform: scale(0.94);
+    }
+
+    /* Mobile Bottom Navigation Bar */
+    .mobile-nav {
+        display: flex;
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        height: calc(56px + env(safe-area-inset-bottom, 0px));
+        padding-bottom: env(safe-area-inset-bottom, 0px);
+        background: #121212;
+        border-top: 1px solid #262626;
+        z-index: 999;
+        justify-content: space-around;
+        align-items: stretch;
+        box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.6);
+    }
+
+    .mobile-nav-btn {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        background: transparent;
+        border: none;
+        color: var(--text-lo);
+        padding: 0.35rem 0.1rem;
+        cursor: pointer;
+        position: relative;
+        transition: color 0.15s ease, transform 0.1s ease;
+        -webkit-tap-highlight-color: transparent;
+    }
+
+    .mobile-nav-btn:active {
+        transform: scale(0.92);
+    }
+
+    .mobile-nav-icon {
+        font-size: 1.25rem;
+        line-height: 1;
+        margin-bottom: 0.2rem;
+    }
+
+    .mobile-nav-label {
+        font-size: 0.65rem;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+    }
+
+    .mobile-nav-btn.is-active {
+        color: var(--orange);
+    }
+
+    .mobile-nav-btn.is-active .mobile-nav-icon {
+        filter: drop-shadow(0 0 6px rgba(255, 143, 67, 0.5));
+    }
+
+    .mobile-nav-btn.is-active::after {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 20%;
+        right: 20%;
+        height: 2px;
+        background: var(--orange);
+        border-radius: 2px;
+        box-shadow: 0 0 8px var(--orange);
+    }
+
+    /* Main Container (Game) on Mobile */
+    .game {
+        display: flex !important;
+        flex-direction: column !important;
+        width: 100vw !important;
+        height: 100vh !important;
+        height: 100dvh !important;
+        max-height: none !important;
+        grid-template-columns: none !important;
+        grid-template-rows: none !important;
+        padding-top: calc(52px + env(safe-area-inset-top, 0px)) !important;
+        padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px)) !important;
+        overflow: hidden !important;
+    }
+
+    /* VIEW SWITCHING LOGIC */
+    /* View: Clicker (Oficina) */
+    .game[data-active-view="clicker"] #viewCounter {
+        display: flex !important;
+        flex: 1 !important;
+        width: 100% !important;
+        height: 100% !important;
+        overflow-y: auto !important;
+        -webkit-overflow-scrolling: touch;
+        border: none !important;
+    }
+    .game[data-active-view="clicker"] #viewCenter,
+    .game[data-active-view="clicker"] #viewShop {
+        display: none !important;
+    }
+
+    /* View: Loja */
+    .game[data-active-view="shop"] #viewShop {
+        display: flex !important;
+        flex: 1 !important;
+        width: 100% !important;
+        height: 100% !important;
+        max-height: none !important;
+        overflow-y: auto !important;
+        -webkit-overflow-scrolling: touch;
+        border: none !important;
+    }
+    .game[data-active-view="shop"] #viewCounter,
+    .game[data-active-view="shop"] #viewCenter {
+        display: none !important;
+    }
+
+    /* View: Perms / Ranking / Status */
+    .game[data-active-view="perms"] #viewCenter,
+    .game[data-active-view="ranking"] #viewCenter,
+    .game[data-active-view="status"] #viewCenter {
+        display: flex !important;
+        flex: 1 !important;
+        width: 100% !important;
+        height: 100% !important;
+        max-height: none !important;
+        overflow-y: auto !important;
+        -webkit-overflow-scrolling: touch;
+        border: none !important;
+    }
+    .game[data-active-view="perms"] #viewCounter,
+    .game[data-active-view="perms"] #viewShop,
+    .game[data-active-view="ranking"] #viewCounter,
+    .game[data-active-view="ranking"] #viewShop,
+    .game[data-active-view="status"] #viewCounter,
+    .game[data-active-view="status"] #viewShop {
+        display: none !important;
+    }
+
+    /* Mobile Clicker View Enhancements */
+    #viewCounter .counter-head {
+        display: none !important; /* Mobile Header already shows balance & rate */
+    }
+
+    #viewCounter .click-area {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 1.2rem 1rem;
+        min-height: 0;
+    }
+
+    #viewCounter .clicker {
+        width: clamp(170px, 48vw, 240px) !important;
+        height: clamp(170px, 48vw, 240px) !important;
+        min-width: auto !important;
+        min-height: auto !important;
+    }
+
+    .mobile-quick-card {
+        display: flex !important;
+        align-items: center;
+        justify-content: space-around;
+        gap: 1.5rem;
+        width: 100%;
+        max-width: 320px;
+        margin-top: 1.5rem;
+        background: #1c1c1c;
+        border: 1px solid #2e2e2e;
+        border-radius: 10px;
+        padding: 0.65rem 1.2rem;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+
+    .mobile-quick-stat {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 0.15rem;
+    }
+
+    .mobile-quick-stat__label {
+        font-size: 0.68rem;
+        color: var(--text-faint);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+    }
+
+    .mobile-quick-stat__val {
+        font-family: var(--mono);
+        font-size: 0.95rem;
+        font-weight: 700;
+        color: var(--orange);
+    }
+
+    /* Mobile Shop View Enhancements */
+    #viewShop {
+        background: var(--bg-void);
+    }
+
+    #viewShop .shop-head {
+        padding: 0.75rem 1rem;
+        background: #1a1a1a;
+        border-bottom: 1px solid var(--panel-edge);
+    }
+
+    #viewShop .shop-qty {
+        padding: 0.6rem 0.8rem;
+        gap: 0.5rem;
+        background: #161616;
+    }
+
+    #viewShop .shop-qty button {
+        flex: 1;
+        padding: 0.55rem 0.2rem;
+        font-size: 0.85rem;
+        font-weight: 700;
+        border-radius: 6px;
+    }
+
+    #viewShop .shop-list {
+        padding: 0.6rem;
+        flex: 1;
+        max-height: none !important;
+        overflow-y: auto !important;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .shop-item {
+        min-height: 60px;
+        padding: 0.75rem 0.9rem;
+        margin-bottom: 0.5rem;
+        border-radius: 8px;
+    }
+
+    .shop-item__icon {
+        font-size: 1.6rem;
+    }
+
+    .shop-item__name {
+        font-size: 0.88rem;
+    }
+
+    .shop-item__cost {
+        font-size: 0.85rem;
+    }
+
+    /* Mobile Center Pane (Perms, Ranking, Status) */
+    #viewCenter .profile-bar {
+        display: none !important; /* Clean screen, mobile header is sticky */
+    }
+
+    #viewCenter .center-nav {
+        display: none !important; /* Mobile bottom nav controls the tabs */
+    }
+
+    #viewCenter .center-body {
+        padding: 0.8rem 0.8rem 2rem 0.8rem;
+        max-height: none !important;
+        overflow-y: auto !important;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .tab-pane {
+        padding: 0;
+    }
+
+    /* Skill Tree on Mobile */
+    .perm-tree-grid {
+        grid-template-columns: 1fr !important;
+        gap: 0.75rem;
+    }
+
+    .perm-node {
+        padding: 0.9rem;
+        border-radius: 10px;
+    }
+
+    /* Stats on Mobile */
+    .stats-grid {
+        grid-template-columns: 1fr 1fr !important;
+        gap: 0.6rem;
+    }
+
+    .stat-card {
+        padding: 0.75rem;
+        border-radius: 8px;
+    }
+
+    /* Modals on Mobile */
+    .modal-dialog {
+        width: 94vw !important;
+        max-width: 440px !important;
+        padding: 1.2rem !important;
+        max-height: 86vh !important;
+        border-radius: 12px;
+    }
+
+    .profile-input {
+        font-size: 16px !important; /* Prevents auto-zoom in iOS Safari */
+        padding: 0.75rem 0.9rem !important;
+    }
+
+    .profile-btn-create {
+        padding: 0.75rem 1.1rem !important;
+        font-size: 0.9rem !important;
+    }
+
+    .profile-item {
+        padding: 0.8rem 0.9rem !important;
+        min-height: 52px !important;
+    }
+
+    .profile-item__btn {
+        padding: 0.5rem 0.9rem !important;
+        font-size: 0.82rem !important;
+    }
 }

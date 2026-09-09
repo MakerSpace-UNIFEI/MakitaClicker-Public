@@ -26,7 +26,10 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
-  'Content-Type': 'application/json; charset=utf-8'
+  'Content-Type': 'application/json; charset=utf-8',
+  'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0',
+  'Pragma': 'no-cache',
+  'Expires': '0'
 };
 
 const HARDWARE_LEASE_KEY = 'hardware:controller';
@@ -355,6 +358,27 @@ function advancePassiveProduction(state, now) {
   state.totalOwned = getTotalOwned(state.owned);
 }
 
+function sanitizeNick(raw) {
+  if (!raw) return 'Maker ' + Math.floor(Math.random() * 1000);
+  let s = String(raw).normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  s = s.replace(/[º°]/g, 'o').replace(/[ª]/g, 'a');
+  s = s.replace(/[^a-zA-Z0-9 _-]/g, '').trim();
+  if (!s) return 'Maker ' + Math.floor(Math.random() * 1000);
+  return s.slice(0, 16);
+}
+
+async function saveUserMeta(env, userEntry) {
+  if (!userEntry || !userEntry.id) return;
+  const { kv } = getKV(env);
+  if (kv) {
+    try {
+      await kv.put(`user_meta:${userEntry.id}`, JSON.stringify(userEntry));
+    } catch (err) {
+      console.error(`[KV] Erro ao gravar user_meta para ${userEntry.id}:`, err);
+    }
+  }
+}
+
 async function loadUsersList(env) {
   const { kv } = getKV(env);
   let kvUsers = null;
@@ -367,12 +391,16 @@ async function loadUsersList(env) {
     }
   }
 
-  // Blindagem contra consistência eventual do KV:
-  // Se houver lista em memória e lista no KV, mescla ambas preservando
-  // os usuários mais recentes e as pontuações mais altas.
-  if (Array.isArray(kvUsers) && Array.isArray(memoryFallbackUsers) && memoryFallbackUsers.length > 0) {
-    const map = new Map();
+  // Mapa de usuários para mesclagem defensiva sem perda de perfis
+  const map = new Map();
+
+  // 1. Incorpora usuários lidos do Cloudflare KV (leitura econômica kv.get)
+  if (Array.isArray(kvUsers)) {
     kvUsers.forEach(u => { if (u && u.id) map.set(u.id, u); });
+  }
+
+  // 2. Incorpora usuários da memória local deste worker (proteção contra replicação assíncrona do KV)
+  if (Array.isArray(memoryFallbackUsers)) {
     memoryFallbackUsers.forEach(u => {
       if (u && u.id) {
         const existing = map.get(u.id);
@@ -387,16 +415,11 @@ async function loadUsersList(env) {
         }
       }
     });
-    const merged = Array.from(map.values());
-    memoryFallbackUsers = merged;
-    return merged;
   }
 
-  if (Array.isArray(kvUsers)) {
-    memoryFallbackUsers = kvUsers;
-    return kvUsers;
-  }
-  return memoryFallbackUsers || [];
+  const merged = Array.from(map.values());
+  memoryFallbackUsers = merged;
+  return merged;
 }
 
 async function saveUsersList(env, list) {
@@ -632,9 +655,36 @@ export async function onRequestGet(context) {
   const url = new URL(request.url);
   const action = url.searchParams.get('action');
   const userId = url.searchParams.get('userId');
+  const clientUserId = url.searchParams.get('clientUserId') || userId;
+  const clientUserName = url.searchParams.get('clientUserName');
 
   const { kvName, kvConnected, diag } = getKV(env);
-  const usersList = await loadUsersList(env);
+  let usersList = await loadUsersList(env);
+
+  // Auto-reconciliação defensiva: se o cliente possui um perfil local que não está em usersList
+  // (devido a eventual consistency ou criação recente), restaura e re-indexa imediatamente
+  if (clientUserId && !usersList.some(u => u.id === clientUserId)) {
+    const { kv } = getKV(env);
+    let meta = null;
+    if (kv) {
+      try { meta = await kv.get(`user_meta:${clientUserId}`, { type: 'json' }); } catch (e) {}
+    }
+    if (!meta) {
+      const { state: uState } = await loadUserState(env, clientUserId);
+      meta = {
+        id: clientUserId,
+        name: clientUserName || 'Maker',
+        createdAt: uState.createdAt || Date.now(),
+        lastSavedAt: uState.lastSavedAt || Date.now(),
+        makitas: uState.makitas || 0,
+        totalMakitasMade: uState.totalMakitasMade || uState.makitas || 0
+      };
+    }
+    usersList.push(meta);
+    await saveUsersList(env, usersList);
+    await saveUserMeta(env, meta);
+  }
+
   const topPlayer = getTopPlayer(usersList);
   const hardwareOwner = await loadHardwareLease(env);
 
@@ -799,7 +849,32 @@ export async function onRequestPost(context) {
 
   const { kvName, kvConnected, diag } = getKV(env);
 
-  const usersList = await loadUsersList(env);
+  let usersList = await loadUsersList(env);
+  const clientUserId = body.userId || url.searchParams.get('clientUserId');
+  const clientUserName = body.userName || url.searchParams.get('clientUserName');
+
+  // Auto-reconciliação defensiva no POST
+  if (clientUserId && !usersList.some(u => u.id === clientUserId)) {
+    const { kv } = getKV(env);
+    let meta = null;
+    if (kv) {
+      try { meta = await kv.get(`user_meta:${clientUserId}`, { type: 'json' }); } catch (e) {}
+    }
+    if (!meta) {
+      meta = {
+        id: clientUserId,
+        name: clientUserName || 'Maker',
+        createdAt: Date.now(),
+        lastSavedAt: Date.now(),
+        makitas: Number(body.makitas) || 0,
+        totalMakitasMade: Number(body.totalMakitasMade) || Number(body.makitas) || 0
+      };
+    }
+    usersList.push(meta);
+    await saveUsersList(env, usersList);
+    await saveUserMeta(env, meta);
+  }
+
   let topPlayer = getTopPlayer(usersList);
   const hardwareOwner = await loadHardwareLease(env);
 
@@ -822,7 +897,7 @@ export async function onRequestPost(context) {
 
   if (action === 'claim_hardware') {
     const userId = body.userId;
-    const userName = String(body.userName || '').trim().replace(/[\r\n\t]/g, '').slice(0, 25) || 'Maker';
+    const userName = sanitizeNick(body.userName);
     const force = body.force === true;
     const now = Date.now();
 
@@ -908,8 +983,7 @@ export async function onRequestPost(context) {
   // AÇÃO 1: CRIAR NOVO PERFIL DE USUÁRIO (Salvo imediatamente no KV)
   // -------------------------------------------------------------
   if (action === 'create_user') {
-    const rawName = String(body.name || '').trim().replace(/[\r\n\t]/g, '');
-    const name = rawName.slice(0, 25) || 'Maker ' + Math.floor(Math.random() * 1000);
+    const name = sanitizeNick(body.name);
     const now = Date.now();
     const userId = 'u_' + now.toString(36) + '_' + Math.random().toString(36).slice(2, 6);
 
@@ -925,6 +999,7 @@ export async function onRequestPost(context) {
       totalMakitasMade: 0
     };
 
+    await saveUserMeta(env, newUserEntry);
     usersList.push(newUserEntry);
     await saveUsersList(env, usersList);
     topPlayer = getTopPlayer(usersList);
@@ -996,12 +1071,31 @@ export async function onRequestPost(context) {
 
     await saveUserState(env, userId, expanded);
 
-    // Atualiza resumo no users:list para ranking rápido
+    // Atualiza resumo no users:list para ranking
     const userIndex = usersList.findIndex(u => u.id === userId);
+    const resolvedName = sanitizeNick(body.userName || body.name || (userIndex >= 0 ? usersList[userIndex].name : 'Maker'));
+    let isNewUserInList = false;
+
     if (userIndex >= 0) {
       usersList[userIndex].lastSavedAt = now;
       usersList[userIndex].makitas = expanded.makitas;
       usersList[userIndex].totalMakitasMade = expanded.totalMakitasMade;
+      if (body.userName) usersList[userIndex].name = resolvedName;
+    } else {
+      isNewUserInList = true;
+      usersList.push({
+        id: userId,
+        name: resolvedName,
+        createdAt: currentState?.createdAt || now,
+        lastSavedAt: now,
+        makitas: expanded.makitas,
+        totalMakitasMade: expanded.totalMakitasMade
+      });
+    }
+
+    // Economia estrita de cota KV: só grava USERS_LIST_KEY se for novo usuário ou se superou o líder
+    const isNewLeader = expanded.totalMakitasMade > (topPlayer?.totalMakitasMade || 0);
+    if (isNewUserInList || isNewLeader) {
       await saveUsersList(env, usersList);
     }
     topPlayer = getTopPlayer(usersList);
@@ -1112,6 +1206,10 @@ export async function onRequestPost(context) {
     }
 
     await deleteUserState(env, userId);
+    const { kv } = getKV(env);
+    if (kv) {
+      try { await kv.delete(`user_meta:${userId}`); } catch (e) {}
+    }
     const updatedUsers = usersList.filter(u => u.id !== userId);
     await saveUsersList(env, updatedUsers);
     topPlayer = getTopPlayer(updatedUsers);
