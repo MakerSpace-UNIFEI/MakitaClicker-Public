@@ -436,7 +436,8 @@ function getCompactGameState() {
         resetEpoch: currentResetEpoch,
         saveRev: currentSaveRev,
         lastSavedAt: lastLocalSaveTime || Date.now(),
-        lastUpdate: Date.now()
+        lastUpdate: Date.now(),
+        lastOnline: Date.now()
     };
 }
 
@@ -492,11 +493,13 @@ function saveLocalState() {
         saveObj.createdAt = currentUserCreatedAt;
         saveObj.lastCloudSaveTime = lastCloudSaveTime;
         saveObj.lastSavedAt = lastLocalSaveTime;
+        saveObj.lastOnline = lastLocalSaveTime;
 
         const jsonStr = JSON.stringify(saveObj);
         localStorage.setItem(getLocalStorageKey(), jsonStr);
         if (currentUserId) {
             localStorage.setItem(`makita_backup_${currentUserId}`, jsonStr);
+            localStorage.setItem(`makita_last_online_${currentUserId}`, String(lastLocalSaveTime));
             saveToCookie(currentUserId, saveObj);
         }
     } catch (e) {
@@ -1265,10 +1268,12 @@ function resetAllProgress(sendToServer = true) {
     currentResetEpoch = now;
     currentSaveRev = (currentSaveRev || 1) + 10;
     lastLocalSaveTime = now;
+    lastOfflineCheckTime = now;
 
     if (currentUserId) {
         clearCookie(currentUserId);
         try {
+            localStorage.setItem(`makita_last_online_${currentUserId}`, String(now));
             localStorage.removeItem(`makita_backup_${currentUserId}`);
         } catch (e) {}
     }
@@ -1618,6 +1623,140 @@ const currentProfileNameEl = document.getElementById('currentProfileName');
 const btnSwitchProfileEl = document.getElementById('btnSwitchProfile');
 const btnSaveCloudEl = document.getElementById('btnSaveCloud');
 const saveStatusTextEl = document.getElementById('saveStatusText');
+
+// ---------- MODAL DE PRODUÇÃO OFFLINE ----------
+const offlineProgressModalEl = document.getElementById('offlineProgressModal');
+const offlinePlayerNameEl = document.getElementById('offlinePlayerName');
+const offlineTimeElapsedEl = document.getElementById('offlineTimeElapsed');
+const offlineMpsRateEl = document.getElementById('offlineMpsRate');
+const offlineEarnedAmountEl = document.getElementById('offlineEarnedAmount');
+const offlineCapNoticeEl = document.getElementById('offlineCapNotice');
+const btnCollectOfflineProgressEl = document.getElementById('btnCollectOfflineProgress');
+
+let isOfflineModalOpen = false;
+let lastOfflineCheckTime = 0;
+
+function formatOfflineDuration(seconds) {
+    const s = Math.max(0, Math.floor(seconds || 0));
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const remSec = s % 60;
+
+    const parts = [];
+    if (h > 0) parts.push(`${h}h`);
+    if (m > 0 || h > 0) parts.push(`${m}m`);
+    parts.push(`${remSec}s`);
+    return parts.join(' ');
+}
+
+function showOfflineProgressModal(seconds, mpsRate, earned, wasCapped = false) {
+    if (!offlineProgressModalEl) return;
+    if (earned < 0.1 || seconds < 15) return;
+
+    if (offlinePlayerNameEl) offlinePlayerNameEl.textContent = currentUserName || 'Maker';
+    if (offlineTimeElapsedEl) offlineTimeElapsedEl.textContent = formatOfflineDuration(seconds);
+    if (offlineMpsRateEl) {
+        const rateFormatted = mpsRate >= 1000 ? formatCompactNumber(mpsRate) : mpsRate.toFixed(1);
+        offlineMpsRateEl.textContent = '+' + rateFormatted + ' /s';
+    }
+    if (offlineEarnedAmountEl) {
+        offlineEarnedAmountEl.textContent = '+' + formatCompactNumber(earned) + ' MKT';
+        offlineEarnedAmountEl.title = '+' + formatFullNumber(earned) + ' Makitas';
+    }
+    if (offlineCapNoticeEl) {
+        offlineCapNoticeEl.style.display = wasCapped ? 'block' : 'none';
+    }
+
+    offlineProgressModalEl.style.display = 'flex';
+    isOfflineModalOpen = true;
+
+    if (navigator.vibrate) {
+        try { navigator.vibrate([30, 50, 30]); } catch (e) {}
+    }
+}
+
+function closeOfflineProgressModal() {
+    if (offlineProgressModalEl) {
+        offlineProgressModalEl.style.display = 'none';
+    }
+    isOfflineModalOpen = false;
+}
+
+function checkAndProcessOfflineProgress(cloudData = null) {
+    if (!currentUserId) return;
+    if (profileModalEl && profileModalEl.style.display !== 'none') return;
+    if (isOfflineModalOpen) return;
+
+    const now = Date.now();
+    if (now - lastOfflineCheckTime < 4000) return;
+    lastOfflineCheckTime = now;
+
+    // Caso 1: A nuvem calculou e enviou offlineGain
+    if (cloudData && typeof cloudData.offlineGain === 'number' && cloudData.offlineGain >= 0.1 && (cloudData.offlineSeconds || 0) >= 15) {
+        const seconds = cloudData.offlineSeconds;
+        const mpsRate = cloudData.offlineMps || mps || calculateLocalMps();
+        const earned = cloudData.offlineGain;
+        const wasCapped = !!cloudData.offlineWasCapped;
+
+        try {
+            localStorage.setItem(`makita_last_online_${currentUserId}`, String(now));
+        } catch (e) {}
+        saveLocalState();
+        showOfflineProgressModal(seconds, mpsRate, earned, wasCapped);
+        return;
+    }
+
+    // Caso 2: Cálculo local (modo offline, local mais recente que nuvem, retorno de aba em segundo plano)
+    const storedLastOnline = Number(localStorage.getItem(`makita_last_online_${currentUserId}`)) || 0;
+    const localSave = Number(lastLocalSaveTime) || 0;
+    const lastActive = Math.max(storedLastOnline, localSave);
+
+    if (lastActive <= 0 || lastActive >= now) {
+        try {
+            localStorage.setItem(`makita_last_online_${currentUserId}`, String(now));
+        } catch (e) {}
+        return;
+    }
+
+    const rawElapsed = (now - lastActive) / 1000.0;
+    if (rawElapsed < 15) {
+        try {
+            localStorage.setItem(`makita_last_online_${currentUserId}`, String(now));
+        } catch (e) {}
+        return;
+    }
+
+    const currentMps = calculateLocalMps();
+    if (currentMps <= 0) {
+        try {
+            localStorage.setItem(`makita_last_online_${currentUserId}`, String(now));
+        } catch (e) {}
+        return;
+    }
+
+    const MAX_OFFLINE_SECONDS = 86400; // Teto de 24h
+    const seconds = Math.min(rawElapsed, MAX_OFFLINE_SECONDS);
+    const wasCapped = rawElapsed > MAX_OFFLINE_SECONDS;
+    const earned = seconds * currentMps;
+
+    if (earned >= 0.1) {
+        makitas += earned;
+        totalMakitasMade += earned;
+        hasUnsavedChanges = true;
+        isDirty = true;
+
+        try {
+            localStorage.setItem(`makita_last_online_${currentUserId}`, String(now));
+        } catch (e) {}
+        saveLocalState();
+        renderUI();
+        showOfflineProgressModal(seconds, currentMps, earned, wasCapped);
+    } else {
+        try {
+            localStorage.setItem(`makita_last_online_${currentUserId}`, String(now));
+        } catch (e) {}
+    }
+}
 
 // ---------- CONTROLE DE POSSE DO CONSOLE FÍSICO (ESP8266) ----------
 const btnClaimHardwareEl = document.getElementById('btnClaimHardware');
@@ -2173,16 +2312,19 @@ async function fetchUserProfileState(userId) {
             saveLocalState();
             // Dispara envio para a nuvem para criar o perfil e subir o progresso!
             saveUserProgressToCloud(false);
+            checkAndProcessOfflineProgress(null);
         } else if (cmp < 0) {
             // A NUVEM É MAIS AVANÇADA
             console.log('[SYNC] Nuvem possui progresso mais avançado. Adotando dados da nuvem.');
             applyCompactState(data);
             saveLocalState();
             hasUnsavedChanges = false;
+            checkAndProcessOfflineProgress(data);
         } else {
             // Equivalentes: mescla defensivamente sem sobrescrever
             mergeSafeIntoLocal(data);
             saveLocalState();
+            checkAndProcessOfflineProgress(data);
         }
 
         if (typeof data.lastSavedAt === 'number' && data.lastSavedAt > 0) {
@@ -2201,6 +2343,7 @@ async function fetchUserProfileState(userId) {
         updateHardwareUI();
     } catch (e) {
         console.warn('Erro ao carregar estado do perfil na nuvem:', e);
+        checkAndProcessOfflineProgress(null);
     }
 }
 
@@ -2396,6 +2539,11 @@ setInterval(updateSaveIndicator, 2000);
 // Sincronização e proteção robusta ao sair, trocar de app ou minimizar (iOS Safari & Android Chrome)
 const handleExitOrSuspend = () => {
     saveLocalState();
+    if (currentUserId) {
+        try {
+            localStorage.setItem(`makita_last_online_${currentUserId}`, String(Date.now()));
+        } catch (e) {}
+    }
     if (currentUserId && hasUnsavedChanges) {
         saveUserProgressToCloud(false);
     }
@@ -2406,6 +2554,9 @@ window.addEventListener('pagehide', handleExitOrSuspend);
 document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') {
         handleExitOrSuspend();
+    } else if (document.visibilityState === 'visible') {
+        lastFrameTime = performance.now();
+        checkAndProcessOfflineProgress(null);
     }
 });
 window.addEventListener('online', () => {
@@ -2657,6 +2808,20 @@ function initGame() {
         });
     }
 
+    if (btnCollectOfflineProgressEl) {
+        btnCollectOfflineProgressEl.addEventListener('click', () => {
+            closeOfflineProgressModal();
+            if (navigator.vibrate) {
+                try { navigator.vibrate([20, 30, 20]); } catch (e) {}
+            }
+            if (logEl) {
+                logEl.textContent = '⚡ Makitas offline coletadas com sucesso!';
+                logEl.style.color = 'var(--teal)';
+            }
+            saveUserProgressToCloud(false);
+        });
+    }
+
     buildShopList();
     buildPermTree();
 
@@ -2676,7 +2841,12 @@ function initGame() {
     setInterval(() => {
         updateStatusUI();
         renderStats();
-    }, 1000); // Atualiza contadores, telemetria e estatísticas a cada segundo
+        if (currentUserId) {
+            try {
+                localStorage.setItem(`makita_last_online_${currentUserId}`, String(Date.now()));
+            } catch (e) {}
+        }
+    }, 1000); // Atualiza contadores, telemetria, online timestamp e estatísticas a cada segundo
 
     // Consulta status de posse do console físico a cada 5s para sincronia rápida entre jogadores
     setInterval(async () => {

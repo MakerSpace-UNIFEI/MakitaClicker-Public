@@ -63,6 +63,15 @@ web/
 
 ---
 
+## ⏱️ Produção Offline Acumulada
+
+- **Cálculo por Delta Temporal:** A cada segundo enquanto o usuário joga, o cliente grava a marcação `makita_last_online_<userId>`. Ao sair, fechar a aba ou suspender o app em segundo plano, o último momento ativo fica persistido.
+- **Retorno e Coleta:** Ao reabrir o site ou trazer a aba de volta ao primeiro plano (`visibilitychange`), o motor calcula o tempo ausente ($\Delta t \ge 15\text{s}$) e a produção passiva das oficinas ativas ($\text{MPS} \times \Delta t$).
+- **Teto Protetivo de 24 Horas:** O ganho offline é limitado a até 86.400 segundos (24 horas) para preservar a economia do jogo e impedir distorções no ranking.
+- **Modal Interativo:** Exibe um resumo com o tempo fora, a taxa de produção e o total de Makitas geradas, creditando o saldo e acionando o salvamento em nuvem imediatamente após o clique em **"Coletar Makitas 🚀"**.
+
+---
+
 ## 📊 Aba de Estatísticas Detalhadas
 A aba **Estatísticas** organiza em tempo real métricas de sessão, persistência e produção:
 1. **Perfil & Sincronização na Nuvem:**

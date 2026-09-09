@@ -416,10 +416,11 @@ async function ensureD1Tables(db) {
   }
 }
 
-// Produção passiva autoritativa baseada no delta de tempo.
+// Produção passiva autoritativa baseada no delta de tempo com teto offline de 24h.
 function advancePassiveProduction(state, now) {
-  const last = state.lastUpdate || now;
-  const dt = Math.max(0, (now - last) / 1000.0);
+  const last = Number(state.lastUpdate) || Number(state.lastSavedAt) || now;
+  const rawDt = Math.max(0, (now - last) / 1000.0);
+  const dt = Math.min(86400, rawDt); // Limite máximo de 24 horas (86.400s)
   const calculatedMps = calculateMps(state.owned, state.perms);
   if ((!state.mps || state.mps <= 0) && calculatedMps > 0) {
     state.mps = calculatedMps;
@@ -429,6 +430,13 @@ function advancePassiveProduction(state, now) {
     const gain = currentMps * dt;
     state.makitas = (state.makitas || 0) + gain;
     state.totalMakitasMade = (state.totalMakitasMade || 0) + gain;
+
+    if (dt >= 15 && gain >= 0.1) {
+      state.offlineGain = (state.offlineGain || 0) + gain;
+      state.offlineSeconds = (state.offlineSeconds || 0) + dt;
+      state.offlineMps = currentMps;
+      state.offlineWasCapped = rawDt > 86400;
+    }
   }
   state.lastUpdate = now;
   state.clickPower = calculateClickPower(state.perms);
@@ -665,7 +673,6 @@ async function loadUserState(env, userId) {
         const parsed = expandUserState(JSON.parse(row.state_json));
         parsed.saveRev = row.save_rev || parsed.saveRev || 0;
         parsed.resetEpoch = row.reset_epoch || parsed.resetEpoch || 0;
-        advancePassiveProduction(parsed, Date.now());
         return { state: parsed, isNew: false, kvName: 'D1', kvConnected: true, kvDiag: 'Carregado do Cloudflare D1' };
       }
 
@@ -675,7 +682,6 @@ async function loadUserState(env, userId) {
         const kvRaw = await kv.get(getUserStateKey(userId), { type: 'json' }).catch(() => null);
         if (kvRaw) {
           const parsed = expandUserState(kvRaw);
-          advancePassiveProduction(parsed, Date.now());
           await saveUserState(env, userId, parsed);
           return { state: parsed, isNew: false, kvName: 'KV->D1', kvConnected: true, kvDiag: 'Migrado do KV para o D1' };
         }

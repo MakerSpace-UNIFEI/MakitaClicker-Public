@@ -1474,6 +1474,58 @@ button:focus-visible {
     margin-top: 0.5rem;
 }
 
+/* Modal de Produção Offline */
+.offline-dialog {
+    border: 1px solid var(--teal) !important;
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.85), 0 0 24px rgba(0, 128, 128, 0.25) !important;
+    max-width: 480px !important;
+}
+
+.offline-stats-box {
+    background: rgba(0, 128, 128, 0.08);
+    border: 1px solid rgba(0, 128, 128, 0.25);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    margin: 1rem 0;
+    text-align: left;
+}
+
+.offline-stat-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.6rem;
+    font-size: 0.92rem;
+}
+
+.offline-stat-label {
+    color: var(--text-lo);
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.offline-stat-value {
+    color: var(--text-hi);
+    font-family: var(--mono);
+    font-weight: 700;
+}
+
+.offline-stat-total {
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    padding-top: 0.75rem;
+    margin-top: 0.75rem;
+    margin-bottom: 0;
+}
+
+.offline-total-value {
+    color: var(--orange);
+    font-size: 1.35rem;
+    font-family: var(--mono);
+    font-weight: 800;
+    text-shadow: 0 0 10px rgba(255, 143, 67, 0.35);
+}
+
 /* =====================================================================
    SISTEMA DE INTERFACE MOBILE RESPONSIVA E NATIVA (< 860px)
    ===================================================================== */

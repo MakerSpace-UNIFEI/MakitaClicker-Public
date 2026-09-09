@@ -92,6 +92,7 @@ O frontend foi desenvolvido com foco em alta performance, responsividade e desac
    - **Desduplicação Automática de Apelidos:** Se vários jogadores utilizarem o mesmo nome, o sistema adiciona dinamicamente sufixos numéricos ordenados pela data de criação (`Pedro`, `Pedro 2`, `Pedro 3`...), preservando o nome original no perfil mais antigo.
    - **Recuperação e Auto-Upload de Perfis Locais:** Perfis criados offline ou em dispositivos móveis presentes no `localStorage` são detectados e enviados automaticamente ao Cloudflare D1/KV com seu progresso completo (saldo, oficinas e árvore de habilidades).
    - **Salvamento Automático & Manual Dual-Engine:** O progresso local é salvo no Cloudflare D1 (SQL relacional) e replicado no Cloudflare KV a cada 3 minutos, ou instantaneamente pelo botão **"💾 Salvar na Nuvem"**.
+   - **Produção Offline Acumulada:** Ao reabrir o jogo ou retornar a uma aba suspensa, o sistema compara a marcação temporal de última atividade (`lastOnline`), calcula a produção passiva das oficinas no período de ausência (com teto de 24 horas) e exibe um modal industrial para coletar o saldo gerado.
    - **Alerta de Saída (`beforeunload`):** Se houver progresso acumulado localmente há mais de 5 minutos sem salvamento na nuvem, o navegador exibe um popup de confirmação antes de fechar a aba.
    - **Barra de Perfil:** Exibe o nome do perfil ativo, botão para alternar de jogador e indicador visual com horário do último salvamento na nuvem.
 3. **Renderização Otimizada com Throttling (6 FPS):**

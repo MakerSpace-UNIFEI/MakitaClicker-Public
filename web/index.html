@@ -400,6 +400,44 @@
     </div>
 </div>
 
+<!-- Modal de Progresso Offline -->
+<div class="modal-overlay" id="offlineProgressModal" style="display: none;">
+    <div class="modal-dialog offline-dialog">
+        <div class="modal-header">
+            <h2 class="modal-title">⏱️ Produção Offline</h2>
+            <p class="modal-subtitle">Suas oficinas continuaram trabalhando enquanto você esteve fora!</p>
+        </div>
+        <div class="modal-section" style="text-align: center; margin: 1.2rem 0;">
+            <div style="font-size: 3rem; margin-bottom: 0.6rem; animation: pulseGreen 2s infinite;">⚙️</div>
+            <p style="font-size: 1.05rem; color: var(--text-hi); margin-bottom: 0.8rem;">
+                Bem-vindo(a) de volta, <strong id="offlinePlayerName" style="color: var(--teal);">Maker</strong>!
+            </p>
+            <div class="offline-stats-box">
+                <div class="offline-stat-row">
+                    <span class="offline-stat-label">⏱️ Tempo ausente:</span>
+                    <strong class="offline-stat-value" id="offlineTimeElapsed">00h 00m 00s</strong>
+                </div>
+                <div class="offline-stat-row">
+                    <span class="offline-stat-label">🏭 Taxa de produção (MPS):</span>
+                    <strong class="offline-stat-value" id="offlineMpsRate" style="color: var(--teal);">+0.0 /s</strong>
+                </div>
+                <div class="offline-stat-row offline-stat-total">
+                    <span class="offline-stat-label" style="color: var(--text-hi); font-weight: bold;">💰 Makitas Acumuladas:</span>
+                    <strong class="offline-total-value" id="offlineEarnedAmount">+0 MKT</strong>
+                </div>
+            </div>
+            <p id="offlineCapNotice" style="display: none; font-size: 0.78rem; color: var(--text-faint); margin-top: 0.4rem;">
+                * O progresso offline é limitado a até 24 horas consecutivas de ausência.
+            </p>
+        </div>
+        <div class="modal-actions" style="display: flex; justify-content: center;">
+            <button type="button" class="profile-btn-create" id="btnCollectOfflineProgress" style="width: 100%; max-width: 320px; padding: 0.85rem; font-size: 1.05rem; cursor: pointer;">
+                Coletar Makitas 🚀
+            </button>
+        </div>
+    </div>
+</div>
+
 <script type="module" src="/game.js"></script>
 </body>
 </html>
