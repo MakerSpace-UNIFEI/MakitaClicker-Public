@@ -46,6 +46,7 @@
         <div class="center-nav">
             <button class="navbtn is-active" id="tabBtnPerm" data-tab="tab-perm">Melhorias Permanentes</button>
             <button class="navbtn" id="tabBtnStats" data-tab="tab-stats">Estatísticas</button>
+            <button class="navbtn" id="tabBtnRanking" data-tab="tab-ranking">🏆 Ranking</button>
             <button class="navbtn" id="tabBtnStatus" data-tab="tab-status">📡 Status & Hardware</button>
         </div>
         <div class="center-log" id="log">Conectando à Nuvem (Cloudflare Pages & KV)...</div>
@@ -149,7 +150,21 @@
                 </div>
             </div>
 
-            <!-- Aba 3: Status & Telemetria do Hardware -->
+            <!-- Aba 3: Ranking Global -->
+            <div class="tab-pane" id="tab-ranking">
+                <div class="ranking-header">
+                    <div>
+                        <h3 class="perm-tree-title">🏆 Ranking Global</h3>
+                        <p class="perm-tree-subtitle">Classificação dos jogadores por total de Makitas produzidas.</p>
+                    </div>
+                    <button class="ranking-refresh-btn" id="btnRefreshRanking" title="Puxar ranking atualizado do servidor">🔄 Atualizar</button>
+                </div>
+                <div class="ranking-list" id="rankingListContainer">
+                    <div class="ranking-empty">Clique em "Atualizar" para carregar o ranking.</div>
+                </div>
+            </div>
+
+            <!-- Aba 4: Status & Telemetria do Hardware -->
             <div class="tab-pane" id="tab-status">
                 <div class="perm-tree-header">
                     <h3 class="perm-tree-title">📡 Telemetria & Status do Hardware</h3>
@@ -227,10 +242,11 @@
                     </div>
 
                     <!-- Card 9: Dono Atual do Hardware Físico -->
-                    <div class="stat-card">
+                    <div class="stat-card stat-card--hardware">
                         <div class="stat-card__label">Controle do Hardware Físico</div>
                         <div class="stat-card__val" id="statHardwareOwner" style="font-size: 1.05rem;">Livre (1º Lugar)</div>
                         <div class="stat-card__hint" id="statHardwareOwnerHint">Cliques creditados ao Líder</div>
+                        <button class="btn-hardware-claim btn-hardware-claim--tab" id="btnClaimHardwareTab" title="Assumir o console físico ESP8266 por 3 minutos">⚡ Assumir Console</button>
                     </div>
                 </div>
             </div>

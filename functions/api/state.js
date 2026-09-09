@@ -517,6 +517,21 @@ export async function onRequestGet(context) {
     });
   }
 
+  // 2.5 Rota de Status do Hardware (polling leve do frontend a cada 5s)
+  if (action === 'get_hardware_status') {
+    return new Response(JSON.stringify({
+      success: true,
+      hardwareOwner,
+      topPlayer,
+      _kv_connected: kvConnected,
+      _kv_binding: kvName || 'NONE',
+      _kv_diag: diag
+    }), {
+      status: 200,
+      headers: CORS_HEADERS
+    });
+  }
+
   // 3. Rota Padrão / Estado Global (ESP8266 & Legado)
   const { state } = await loadState(env);
   const now = Date.now();

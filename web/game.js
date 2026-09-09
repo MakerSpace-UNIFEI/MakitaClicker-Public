@@ -109,8 +109,18 @@ tabBtns.forEach(btn => {
             pane.classList.toggle('is-active', pane.id === targetTab);
         });
         isDirty = true;
+        // Auto-carrega ranking ao abrir a aba
+        if (targetTab === 'tab-ranking') {
+            fetchRanking();
+        }
     });
 });
+
+// Botão Atualizar do ranking (wired early para ser capturado mesmo antes do initGame)
+const _btnRefreshRanking = document.getElementById('btnRefreshRanking');
+if (_btnRefreshRanking) {
+    _btnRefreshRanking.addEventListener('click', () => fetchRanking());
+}
 
 // ---------- PERSISTÊNCIA LOCAL (LOCALSTORAGE POR PERFIL) ----------
 function getLocalStorageKey() {
@@ -1102,6 +1112,7 @@ const hardwareBusyOwnerNameEl = document.getElementById('hardwareBusyOwnerName')
 const hardwareBusyRemainingTimeEl = document.getElementById('hardwareBusyRemainingTime');
 const btnCancelHardwareClaimEl = document.getElementById('btnCancelHardwareClaim');
 const btnConfirmHardwareTakeoverEl = document.getElementById('btnConfirmHardwareTakeover');
+const btnClaimHardwareTabEl = document.getElementById('btnClaimHardwareTab');
 
 function formatHardwareTime(sec) {
     const s = Math.max(0, Math.floor(sec || 0));
@@ -1123,14 +1134,24 @@ function setLatestHardwareOwner(owner) {
 }
 
 function updateHardwareUI() {
+    const isLeader = latestTopPlayer && latestTopPlayer.id && latestTopPlayer.id === currentUserId;
+    const isActive = latestHardwareOwner && latestHardwareOwner.active && latestHardwareOwner.remainingSec > 0;
+    const isMe = isActive && (latestHardwareOwner.userId === currentUserId);
+    const remStr = isActive ? formatHardwareTime(latestHardwareOwner.remainingSec) : '';
+
+    // ---------- Status card text (Card 9) ----------
     if (statHardwareOwnerEl) {
-        if (latestHardwareOwner && latestHardwareOwner.active && latestHardwareOwner.remainingSec > 0) {
-            const isMe = (latestHardwareOwner.userId === currentUserId);
-            const remStr = formatHardwareTime(latestHardwareOwner.remainingSec);
+        if (isActive) {
             statHardwareOwnerEl.textContent = `${latestHardwareOwner.userName} (${remStr})`;
             statHardwareOwnerEl.style.color = isMe ? 'var(--green)' : 'var(--orange)';
             if (statHardwareOwnerHintEl) {
                 statHardwareOwnerHintEl.textContent = isMe ? '⚡ Cliques físicos creditados ao seu perfil!' : 'Controlado por outro jogador';
+            }
+        } else if (isLeader) {
+            statHardwareOwnerEl.textContent = '👑 Você (1º Lugar)';
+            statHardwareOwnerEl.style.color = '#facc15';
+            if (statHardwareOwnerHintEl) {
+                statHardwareOwnerHintEl.textContent = 'Cliques físicos já vão para o seu perfil automaticamente';
             }
         } else {
             statHardwareOwnerEl.textContent = 'Livre (1º Lugar)';
@@ -1141,26 +1162,43 @@ function updateHardwareUI() {
         }
     }
 
-    if (!btnClaimHardwareEl) return;
+    // ---------- Atualiza ambos os botões (header + aba Status) ----------
+    const buttons = [btnClaimHardwareEl, btnClaimHardwareTabEl].filter(Boolean);
+    if (buttons.length === 0) return;
 
-    if (latestHardwareOwner && latestHardwareOwner.active && latestHardwareOwner.remainingSec > 0) {
-        const remStr = formatHardwareTime(latestHardwareOwner.remainingSec);
-        const isMe = (latestHardwareOwner.userId === currentUserId);
-
-        if (isMe) {
-            btnClaimHardwareEl.className = 'btn-hardware-claim is-owned';
-            btnClaimHardwareEl.textContent = `🎮 Console Vinculado (${remStr})`;
-            btnClaimHardwareEl.title = 'Você está no comando do hardware físico! Seus cliques físicos no ESP8266 vão para este perfil.';
+    for (const btn of buttons) {
+        if (isActive) {
+            if (isMe) {
+                // Estado A: Eu sou o dono temporário ativo
+                btn.className = btn.classList.contains('btn-hardware-claim--tab')
+                    ? 'btn-hardware-claim btn-hardware-claim--tab is-owned'
+                    : 'btn-hardware-claim is-owned';
+                btn.textContent = `🎮 Console Ativo (${remStr})`;
+                btn.title = 'Você está no controle! Clique para estender ou liberar.';
+            } else {
+                // Estado B: Outro jogador é o dono temporário
+                btn.className = btn.classList.contains('btn-hardware-claim--tab')
+                    ? 'btn-hardware-claim btn-hardware-claim--tab is-busy'
+                    : 'btn-hardware-claim is-busy';
+                const shortName = (latestHardwareOwner.userName || 'Maker').slice(0, 10);
+                btn.textContent = `🔒 ${shortName} (${remStr})`;
+                btn.title = `Controlado por ${latestHardwareOwner.userName}. Clique para tomar o controle!`;
+            }
+        } else if (isLeader) {
+            // Estado C: Console livre e EU sou o 1º lugar (dono padrão)
+            btn.className = btn.classList.contains('btn-hardware-claim--tab')
+                ? 'btn-hardware-claim btn-hardware-claim--tab is-leader'
+                : 'btn-hardware-claim is-leader';
+            btn.textContent = '👑 Você é o Líder';
+            btn.title = 'Você é o 1º lugar! Cliques físicos já vão para o seu perfil automaticamente.';
         } else {
-            btnClaimHardwareEl.className = 'btn-hardware-claim is-busy';
-            const shortName = (latestHardwareOwner.userName || 'Maker').slice(0, 10);
-            btnClaimHardwareEl.textContent = `🔒 ${shortName} (${remStr})`;
-            btnClaimHardwareEl.title = `Controlado por ${latestHardwareOwner.userName}. Clique para assumir o controle!`;
+            // Estado D: Console livre e eu NÃO sou o 1º lugar
+            btn.className = btn.classList.contains('btn-hardware-claim--tab')
+                ? 'btn-hardware-claim btn-hardware-claim--tab'
+                : 'btn-hardware-claim';
+            btn.textContent = '⚡ Tomar Console (3 min)';
+            btn.title = 'Assumir o console físico ESP8266 por 3 minutos para creditar cliques no seu perfil.';
         }
-    } else {
-        btnClaimHardwareEl.className = 'btn-hardware-claim';
-        btnClaimHardwareEl.textContent = '⚡ Assumir Console';
-        btnClaimHardwareEl.title = 'Assumir o console físico ESP8266 por 3 minutos para creditar cliques no seu perfil.';
     }
 }
 
@@ -1190,6 +1228,9 @@ async function claimHardware(force = false) {
 
     if (btnClaimHardwareEl) {
         btnClaimHardwareEl.disabled = true;
+    }
+    if (btnClaimHardwareTabEl) {
+        btnClaimHardwareTabEl.disabled = true;
     }
 
     try {
@@ -1230,6 +1271,9 @@ async function claimHardware(force = false) {
     } finally {
         if (btnClaimHardwareEl) {
             btnClaimHardwareEl.disabled = false;
+        }
+        if (btnClaimHardwareTabEl) {
+            btnClaimHardwareTabEl.disabled = false;
         }
     }
 }
@@ -1287,7 +1331,13 @@ function handleHardwareClaimClick() {
             openHardwareBusyModal(latestHardwareOwner);
         }
     } else {
-        claimHardware(false);
+        // Se eu já sou o líder (1º lugar), informar que já sou o dono padrão
+        const isLeader = latestTopPlayer && latestTopPlayer.id && latestTopPlayer.id === currentUserId;
+        if (isLeader) {
+            alert('👑 Você já é o 1º lugar no ranking!\n\nOs cliques físicos do console ESP8266 já são creditados automaticamente no seu perfil.\n\nVocê só precisa "Tomar Console" se quiser travar o controle por 3 minutos (impedir que outro jogador assuma).');
+        } else {
+            claimHardware(false);
+        }
     }
 }
 
@@ -1320,6 +1370,81 @@ function updateSaveIndicator() {
         saveStatusTextEl.textContent = elapsedSec < 10 ? '🟢 Salvo agora' : `🟢 Salvo há ${elapsedSec < 60 ? elapsedSec + 's' : elapsedMin + 'm'}`;
         saveStatusTextEl.style.color = 'var(--green)';
     }
+}
+
+// ---------- RANKING GLOBAL ----------
+const rankingListContainerEl = document.getElementById('rankingListContainer');
+const btnRefreshRankingEl = document.getElementById('btnRefreshRanking');
+
+async function fetchRanking() {
+    if (!rankingListContainerEl) return;
+    rankingListContainerEl.innerHTML = '<div class="ranking-empty">Carregando ranking...</div>';
+    if (btnRefreshRankingEl) {
+        btnRefreshRankingEl.disabled = true;
+        btnRefreshRankingEl.textContent = '⏳ Carregando...';
+    }
+
+    try {
+        const res = await fetch('/api/state?action=list_users');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+
+        if (data.topPlayer) latestTopPlayer = data.topPlayer;
+        if (data.hardwareOwner) setLatestHardwareOwner(data.hardwareOwner);
+
+        renderRanking(data.users || []);
+    } catch (e) {
+        console.warn('Erro ao carregar ranking:', e);
+        rankingListContainerEl.innerHTML = '<div class="ranking-empty">Erro ao carregar o ranking. Tente novamente.</div>';
+    } finally {
+        if (btnRefreshRankingEl) {
+            btnRefreshRankingEl.disabled = false;
+            btnRefreshRankingEl.textContent = '🔄 Atualizar';
+        }
+    }
+}
+
+function renderRanking(users) {
+    if (!rankingListContainerEl) return;
+    if (!users || users.length === 0) {
+        rankingListContainerEl.innerHTML = '<div class="ranking-empty">Nenhum jogador registrado ainda.</div>';
+        return;
+    }
+
+    // Ordena por totalMakitasMade decrescente
+    users.sort((a, b) => (b.totalMakitasMade || b.makitas || 0) - (a.totalMakitasMade || a.makitas || 0));
+
+    const topScore = users[0].totalMakitasMade || users[0].makitas || 0;
+
+    rankingListContainerEl.innerHTML = '';
+    users.forEach((user, idx) => {
+        const score = user.totalMakitasMade || user.makitas || 0;
+        const isMe = user.id === currentUserId;
+        const pos = idx + 1;
+
+        const medal = pos === 1 ? '🥇' : (pos === 2 ? '🥈' : (pos === 3 ? '🥉' : `#${pos}`));
+        const barPct = topScore > 0 ? Math.max(1, (score / topScore) * 100) : 0;
+
+        const row = document.createElement('div');
+        row.className = 'ranking-row' + (isMe ? ' is-me' : '') + (pos === 1 ? ' is-top1' : '');
+
+        row.innerHTML = `
+            <div class="ranking-pos">${medal}</div>
+            <div class="ranking-info">
+                <div class="ranking-name">${escapeHtml(user.name)}${isMe ? ' <span class="ranking-you">(Você)</span>' : ''}</div>
+                <div class="ranking-bar-track"><div class="ranking-bar-fill" style="width: ${barPct}%"></div></div>
+            </div>
+            <div class="ranking-score">${formatCompactNumber(score)}</div>
+        `;
+
+        rankingListContainerEl.appendChild(row);
+    });
+}
+
+function escapeHtml(str) {
+    const d = document.createElement('div');
+    d.textContent = str;
+    return d.innerHTML;
 }
 
 async function openProfileModal() {
@@ -1740,6 +1865,9 @@ function initGame() {
 
     if (btnClaimHardwareEl) {
         btnClaimHardwareEl.addEventListener('click', handleHardwareClaimClick);
+    }
+    if (btnClaimHardwareTabEl) {
+        btnClaimHardwareTabEl.addEventListener('click', handleHardwareClaimClick);
     }
     if (btnCancelHardwareClaimEl) {
         btnCancelHardwareClaimEl.addEventListener('click', closeHardwareBusyModal);
