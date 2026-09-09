@@ -591,6 +591,14 @@ void saveLocalGameState() {
   f.close();
 }
 
+// Controle de Sincronização e Saves Periódicos
+unsigned long lastTick = 0;
+unsigned long lastCloudSync = 0;
+unsigned long lastLocalSave = 0;
+const unsigned long CLOUD_SYNC_INTERVAL_ACTIVE_MS = 1500; // 1.5s se houver cliques físicos pendentes (sincronização rápida com D1)
+const unsigned long CLOUD_SYNC_INTERVAL_IDLE_MS   = 3000; // 3.0s quando ocioso (sincroniza dono/top player do D1)
+const unsigned long LOCAL_SAVE_INTERVAL_MS = 15000;       // Autosave condicional na flash LittleFS a cada 15 segundos
+
 // Controle de Reset Remoto da ESP
 // Cache de Sessão TLS BearSSL: acelera handshakes subsequentes de ~2000ms para ~30ms (elimina travamentos)
 static BearSSL::Session sslSession;
@@ -599,6 +607,7 @@ bool forceCloudSync = false;
 
 // ===== SINCRONIZAÇÃO COM A NUVEM (ESP = RECEIVER, SERVIDOR = MASTER) =====
 void syncWithCloud() {
+  unsigned long syncInterval = (pendingPhysicalClicks > 0) ? CLOUD_SYNC_INTERVAL_ACTIVE_MS : CLOUD_SYNC_INTERVAL_IDLE_MS;
   if (WiFi.status() != WL_CONNECTED) {
     statusAtual = "Offline";
     precisaAtualizarLCD = true;
@@ -617,11 +626,11 @@ void syncWithCloud() {
   WiFiClientSecure client;
   client.setInsecure();
   client.setBufferSizes(2560, 768); // Buffer expandido para comportar respostas JSON da nuvem sem fragmentação
-  client.setTimeout(2500);
+  client.setTimeout(3500);
   client.setSession(&sslSession);    // <--- TLS Session Resumption! Handshake abreviado (~30ms)
 
   HTTPClient http;
-  http.setTimeout(2500);
+  http.setTimeout(3500);
   http.begin(client, STATE_URL);
   http.addHeader("Content-Type", "application/json");
 
@@ -974,6 +983,8 @@ void syncWithCloud() {
     Serial.printf("[CLOUD] Falha HTTP: %d\n", httpCode);
     if (WiFi.status() == WL_CONNECTED) {
       statusAtual = "Ativo";
+      // Em caso de falha transiente, reagenda tentativa rapida em 1s em vez de esperar todo o ciclo
+      lastCloudSync = millis() - (syncInterval - 1000);
     } else {
       statusAtual = "Offline";
     }
@@ -991,11 +1002,11 @@ bool enviarAckOrdem(const char* orderId) {
   WiFiClientSecure client;
   client.setInsecure();
   client.setBufferSizes(2560, 768);
-  client.setTimeout(2500);
+  client.setTimeout(3000);
   client.setSession(&sslSession);
 
   HTTPClient http;
-  http.setTimeout(2500);
+  http.setTimeout(3000);
   http.begin(client, STATE_URL);
   http.addHeader("Content-Type", "application/json");
 
@@ -1263,13 +1274,6 @@ void setup() {
   for (int i = 0; i < 4; i++) prevLcdLines[i][0] = '\0';
   atualizarLCD();
 }
-
-unsigned long lastTick = 0;
-unsigned long lastCloudSync = 0;
-unsigned long lastLocalSave = 0;
-const unsigned long CLOUD_SYNC_INTERVAL_ACTIVE_MS = 2000; // 2.0s se houver cliques físicos pendentes
-const unsigned long CLOUD_SYNC_INTERVAL_IDLE_MS   = 3500; // 3.5s quando ocioso (rápido para claim de console e ranking sem travar a CPU)
-const unsigned long LOCAL_SAVE_INTERVAL_MS = 30000;       // Autosave condicional na flash a cada 30 segundos
 
 void gerenciarWiFi() {
   unsigned long now = millis();

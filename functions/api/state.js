@@ -372,6 +372,22 @@ function getD1(env) {
   return null;
 }
 
+// Controle de escrita no KV secundario (protecao da cota gratuita de 1.000 writes/dia do Cloudflare KV)
+// O Cloudflare D1 e o banco autoritativo principal (100.000 writes/dia e 5.000.000 reads/dia), gravado a cada acao
+const lastKvWriteMap = new Map();
+const KV_WRITE_THROTTLE_MS = 60 * 1000; // No maximo 1 escrita por chave a cada 60s no KV (exceto quando forceKv = true)
+
+function canWriteToKv(key, force = false) {
+  if (force) return true;
+  const now = Date.now();
+  const last = lastKvWriteMap.get(key) || 0;
+  if (now - last >= KV_WRITE_THROTTLE_MS) {
+    lastKvWriteMap.set(key, now);
+    return true;
+  }
+  return false;
+}
+
 let d1TablesChecked = false;
 async function ensureD1Tables(db) {
   if (d1TablesChecked || !db) return;
@@ -408,7 +424,13 @@ async function ensureD1Tables(db) {
         banned_until INTEGER NOT NULL,
         reason TEXT
       )`),
-      db.prepare(`CREATE INDEX IF NOT EXISTS idx_users_total_makitas ON users(total_makitas_made DESC)`)
+      db.prepare(`CREATE TABLE IF NOT EXISTS global_state (
+        key TEXT PRIMARY KEY,
+        value_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`),
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_users_total_makitas ON users(total_makitas_made DESC)`),
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_users_last_saved ON users(last_saved_at DESC)`)
     ]);
     d1TablesChecked = true;
   } catch (e) {
@@ -498,15 +520,20 @@ function deduplicateUserNames(list) {
   return { list: sorted, changed };
 }
 
-async function saveUserMeta(env, userEntry) {
+async function saveUserMeta(env, userEntry, forceKv = false) {
   if (!userEntry || !userEntry.id) return;
   const db = getD1(env);
   if (db) {
     try {
       await ensureD1Tables(db);
       await db.prepare(`
-        INSERT OR REPLACE INTO users (id, name, created_at, last_saved_at, makitas, total_makitas_made)
+        INSERT INTO users (id, name, created_at, last_saved_at, makitas, total_makitas_made)
         VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name = CASE WHEN excluded.name != '' AND excluded.name != 'Maker' THEN excluded.name ELSE users.name END,
+          last_saved_at = excluded.last_saved_at,
+          makitas = excluded.makitas,
+          total_makitas_made = excluded.total_makitas_made
       `).bind(
         userEntry.id,
         userEntry.name || 'Maker',
@@ -520,8 +547,9 @@ async function saveUserMeta(env, userEntry) {
     }
   }
 
+  // Backup secundário no KV com throttling
   const { kv } = getKV(env);
-  if (kv) {
+  if (kv && canWriteToKv(`user_meta:${userEntry.id}`, forceKv)) {
     try {
       await kv.put(`user_meta:${userEntry.id}`, JSON.stringify(userEntry));
     } catch (err) {
@@ -531,6 +559,7 @@ async function saveUserMeta(env, userEntry) {
 }
 
 async function loadUsersList(env) {
+  // 1. D1 é o BANCO PRINCIPAL para listagem e ranking autoritativo
   const db = getD1(env);
   if (db) {
     try {
@@ -543,7 +572,7 @@ async function loadUsersList(env) {
         const { list: deduped, changed } = deduplicateUserNames(results);
         if (changed) {
           console.log('[DEDUP] Nomes duplicados desambiguados no D1.');
-          await saveUsersList(env, deduped);
+          await saveUsersList(env, deduped, true);
         }
         memoryFallbackUsers = deduped;
         return deduped;
@@ -578,7 +607,7 @@ async function loadUsersList(env) {
     }
   }
 
-  // Fallback para KV
+  // 2. Fallback para KV caso D1 esteja temporariamente indisponível
   const { kv } = getKV(env);
   let kvUsers = null;
   if (kv) {
@@ -615,13 +644,14 @@ async function loadUsersList(env) {
   const merged = Array.from(map.values());
   const { list: deduped, changed } = deduplicateUserNames(merged);
   if (changed) {
-    await saveUsersList(env, deduped);
+    await saveUsersList(env, deduped, true);
   }
   memoryFallbackUsers = deduped;
   return deduped;
 }
 
-async function saveUsersList(env, list) {
+async function saveUsersList(env, list, forceKv = false) {
+  // 1. Grava no D1 (Banco Principal)
   const db = getD1(env);
   if (db && Array.isArray(list)) {
     try {
@@ -645,12 +675,13 @@ async function saveUsersList(env, list) {
     }
   }
 
+  // 2. Backup no KV com throttling
   const { kv } = getKV(env);
-  if (kv) {
+  if (kv && canWriteToKv(USERS_LIST_KEY, forceKv)) {
     try {
       await kv.put(USERS_LIST_KEY, JSON.stringify(list));
     } catch (err) {
-      console.error('[KV] Erro ao salvar lista de usuários:', err);
+      console.error('[KV] Erro ao salvar backup de usuários no KV:', err);
     }
   }
   memoryFallbackUsers = list;
@@ -661,6 +692,7 @@ async function loadUserState(env, userId) {
     return { state: getDefaultState(), isNew: true, kvName: 'none', kvConnected: false, diag: 'Sem userId' };
   }
 
+  // 1. D1 é o BANCO PRINCIPAL para o estado do jogador
   const db = getD1(env);
   if (db) {
     try {
@@ -673,7 +705,8 @@ async function loadUserState(env, userId) {
         const parsed = expandUserState(JSON.parse(row.state_json));
         parsed.saveRev = row.save_rev || parsed.saveRev || 0;
         parsed.resetEpoch = row.reset_epoch || parsed.resetEpoch || 0;
-        return { state: parsed, isNew: false, kvName: 'D1', kvConnected: true, kvDiag: 'Carregado do Cloudflare D1' };
+        memoryFallbackUserStates[userId] = parsed;
+        return { state: parsed, isNew: false, kvName: 'D1 (Primary)', kvConnected: true, kvDiag: 'Carregado do Cloudflare D1 (Primary)' };
       }
 
       // Migração sob demanda do KV para D1:
@@ -682,16 +715,16 @@ async function loadUserState(env, userId) {
         const kvRaw = await kv.get(getUserStateKey(userId), { type: 'json' }).catch(() => null);
         if (kvRaw) {
           const parsed = expandUserState(kvRaw);
-          await saveUserState(env, userId, parsed);
+          await saveUserState(env, userId, parsed, null, true);
           return { state: parsed, isNew: false, kvName: 'KV->D1', kvConnected: true, kvDiag: 'Migrado do KV para o D1' };
         }
       }
     } catch (e) {
-      console.error('[D1] Erro ao ler estado do usuário:', e);
+      console.error('[D1] Erro ao ler estado do usuário no D1:', e);
     }
   }
 
-  // Fallback para KV
+  // 2. Fallback para KV caso D1 não esteja configurado
   const { kv, name, kvConnected, diag } = getKV(env);
   const key = getUserStateKey(userId);
   let kvState = null;
@@ -729,7 +762,7 @@ async function loadUserState(env, userId) {
   return { state, isNew: !isFound, kvName: name, kvConnected: !!kv, kvDiag: diag };
 }
 
-async function saveUserState(env, userId, state, userName = null) {
+async function saveUserState(env, userId, state, userName = null, forceKv = false) {
   const currentMem = memoryFallbackUserStates[userId];
   if (currentMem) {
     const memReset = currentMem.resetEpoch || 0;
@@ -747,6 +780,7 @@ async function saveUserState(env, userId, state, userName = null) {
   const resolvedName = sanitizeNick(userName || state.name || 'Maker');
   const createdAt = Number(state.createdAt) || now;
 
+  // 1. D1 é o BANCO PRINCIPAL (grava atomicamente e imediatamente a cada chamada)
   const db = getD1(env);
   if (db) {
     try {
@@ -772,13 +806,13 @@ async function saveUserState(env, userId, state, userName = null) {
         `).bind(userId, stateJson, saveRev, resetEpoch, now)
       ]);
     } catch (e) {
-      console.error('[D1] Erro ao salvar estado:', e);
+      console.error('[D1] Erro ao salvar estado no D1:', e);
     }
   }
 
-  // Backup no KV
+  // 2. KV é o BACKUP SECUNDÁRIO (com throttling de 60s para preservar a cota de 1.000 writes/dia)
   const { kv } = getKV(env);
-  if (kv) {
+  if (kv && canWriteToKv(getUserStateKey(userId), forceKv)) {
     try {
       await kv.put(getUserStateKey(userId), stateJson);
       await kv.put(`user_meta:${userId}`, JSON.stringify({
@@ -790,7 +824,7 @@ async function saveUserState(env, userId, state, userName = null) {
         totalMakitasMade: Number(state.totalMakitasMade) || 0
       }));
     } catch (err) {
-      console.error(`[KV] Erro ao salvar estado do usuário ${userId}:`, err);
+      console.error(`[KV] Erro ao salvar backup no KV para ${userId}:`, err);
     }
   }
   memoryFallbackUserStates[userId] = state;
@@ -819,11 +853,41 @@ async function deleteUserState(env, userId) {
 }
 
 async function loadState(env) {
+  // 1. D1 é o BANCO PRINCIPAL para o estado global
+  const db = getD1(env);
+  if (db) {
+    try {
+      await ensureD1Tables(db);
+      const row = await db.prepare('SELECT value_json FROM global_state WHERE key = ?').bind(KV_KEY).first();
+      if (row && row.value_json) {
+        const parsed = JSON.parse(row.value_json);
+        memoryFallbackState = parsed;
+        return { state: parsed, kvName: 'D1 (Primary)', kvConnected: true, kvDiag: 'D1 Global Primary' };
+      }
+
+      // Migração sob demanda do KV para D1 se D1 estiver vazio
+      const { kv } = getKV(env);
+      if (kv) {
+        const data = await kv.get(KV_KEY, { type: 'json' }).catch(() => null);
+        if (data && typeof data === 'object') {
+          await db.prepare('INSERT OR REPLACE INTO global_state (key, value_json, updated_at) VALUES (?, ?, ?)')
+            .bind(KV_KEY, JSON.stringify(data), Date.now()).run().catch(() => {});
+          memoryFallbackState = data;
+          return { state: data, kvName: 'KV->D1', kvConnected: true, kvDiag: 'Migrado do KV para o D1' };
+        }
+      }
+    } catch (e) {
+      console.error('[D1] Erro ao ler global_state do D1:', e);
+    }
+  }
+
+  // 2. Fallback para KV caso D1 não esteja ativo
   const { kv, name, diag } = getKV(env);
   if (kv) {
     try {
       const data = await kv.get(KV_KEY, { type: 'json' });
       if (data && typeof data === 'object') {
+        memoryFallbackState = data;
         return { state: data, kvName: name, kvConnected: true, kvDiag: diag };
       }
     } catch (err) {
@@ -836,13 +900,29 @@ async function loadState(env) {
   return { state: memoryFallbackState, kvName: name, kvConnected: !!kv, kvDiag: diag };
 }
 
-async function saveState(env, state) {
-  const { kv, name } = getKV(env);
-  if (kv) {
+async function saveState(env, state, forceKv = false) {
+  const now = Date.now();
+  const stateJson = JSON.stringify(state);
+
+  // 1. D1 é o BANCO PRINCIPAL (grava sempre no D1)
+  const db = getD1(env);
+  if (db) {
     try {
-      await kv.put(KV_KEY, JSON.stringify(state));
+      await ensureD1Tables(db);
+      await db.prepare('INSERT OR REPLACE INTO global_state (key, value_json, updated_at) VALUES (?, ?, ?)')
+        .bind(KV_KEY, stateJson, now).run();
+    } catch (e) {
+      console.error('[D1] Erro ao gravar global_state no D1:', e);
+    }
+  }
+
+  // 2. KV é o BACKUP SECUNDÁRIO (com throttling)
+  const { kv, name } = getKV(env);
+  if (kv && canWriteToKv(KV_KEY, forceKv)) {
+    try {
+      await kv.put(KV_KEY, stateJson);
     } catch (err) {
-      console.error(`[KV] Erro ao gravar KV (${name}):`, err);
+      console.error(`[KV] Erro ao gravar backup KV (${name}):`, err);
     }
   }
   memoryFallbackState = state;
@@ -1032,16 +1112,34 @@ export async function onRequestGet(context) {
 
   const { kvName, kvConnected, diag } = getKV(env);
   const db = getD1(env);
-  const storageType = (db && kvConnected) ? 'D1+KV (Dual-Engine)' : (db ? 'D1 (Primary)' : (kvConnected ? 'KV (Primary)' : 'Memory'));
+  const storageType = (db && kvConnected) ? 'D1 (Principal) + KV (Backup)' : (db ? 'D1 (Principal)' : (kvConnected ? 'KV (Secundário)' : 'Memória'));
   let usersList = await loadUsersList(env);
 
   // Auto-reconciliação defensiva: se o cliente possui um perfil local que não está em usersList
-  // (devido a eventual consistency ou criação recente), restaura e re-indexa imediatamente
+  // restaura diretamente do D1 como fonte autoritativa primária
   if (clientUserId && !usersList.some(u => u.id === clientUserId)) {
-    const { kv } = getKV(env);
     let meta = null;
-    if (kv) {
-      try { meta = await kv.get(`user_meta:${clientUserId}`, { type: 'json' }); } catch (e) {}
+    if (db) {
+      try {
+        await ensureD1Tables(db);
+        const d1Row = await db.prepare('SELECT id, name, created_at as createdAt, last_saved_at as lastSavedAt, makitas, total_makitas_made as totalMakitasMade FROM users WHERE id = ?').bind(clientUserId).first();
+        if (d1Row) {
+          meta = {
+            id: d1Row.id,
+            name: sanitizeNick(d1Row.name || clientUserName || 'Maker'),
+            createdAt: d1Row.createdAt || Date.now(),
+            lastSavedAt: d1Row.lastSavedAt || Date.now(),
+            makitas: Math.max(Number(d1Row.makitas) || 0, clientMakitas),
+            totalMakitasMade: Math.max(Number(d1Row.totalMakitasMade) || Number(d1Row.makitas) || 0, clientTotalMakitas)
+          };
+        }
+      } catch (e) {}
+    }
+    if (!meta) {
+      const { kv } = getKV(env);
+      if (kv) {
+        try { meta = await kv.get(`user_meta:${clientUserId}`, { type: 'json' }); } catch (e) {}
+      }
     }
     if (!meta) {
       const { state: uState } = await loadUserState(env, clientUserId);
@@ -1055,8 +1153,8 @@ export async function onRequestGet(context) {
       };
     }
     usersList.push(meta);
-    await saveUsersList(env, usersList);
-    await saveUserMeta(env, meta);
+    await saveUsersList(env, usersList, true);
+    await saveUserMeta(env, meta, true);
   }
 
   const topPlayer = getTopPlayer(usersList);
@@ -1079,35 +1177,52 @@ export async function onRequestGet(context) {
     });
   }
 
-  // 2. Rota de Estado Individual de Perfil
+  // 2. Rota de Estado do Perfil de Usuário
   if (userId) {
-    const { state, isNew } = await loadUserState(env, userId);
+    const { state: userState, isNew, kvName: userKv, kvConnected: userConn, kvDiag: userDiag } = await loadUserState(env, userId);
     const now = Date.now();
-    advancePassiveProduction(state, now);
+    advancePassiveProduction(userState, now);
 
     return new Response(JSON.stringify({
-      ...state,
-      userFound: !isNew,
-      isNewUser: !!isNew,
+      userId,
+      name: userState.name || 'Maker',
+      ...userState,
       topPlayer,
       hardwareOwner,
+      isNew,
       _storage: storageType,
       _d1_connected: !!db,
-      _kv_connected: kvConnected,
-      _kv_binding: kvName || 'NONE',
-      _kv_diag: diag
+      _kv_connected: userConn,
+      _kv_binding: userKv,
+      _kv_diag: userDiag
     }), {
       status: 200,
       headers: CORS_HEADERS
     });
   }
 
-  // 2.5 Rota de Status do Hardware (polling leve do frontend a cada 5s)
+  // 2.5 Rota de Status do Hardware (polling leve do frontend a cada 4-5s)
   if (action === 'get_hardware_status') {
+    let currentUserData = null;
+    const reqUserId = url.searchParams.get('userId') || clientUserId;
+    if (reqUserId && db) {
+      try {
+        const uRow = await db.prepare('SELECT makitas, total_makitas_made as totalMakitasMade, last_saved_at as lastSavedAt FROM users WHERE id = ?').bind(reqUserId).first();
+        if (uRow) {
+          currentUserData = {
+            makitas: Number(uRow.makitas) || 0,
+            totalMakitasMade: Number(uRow.totalMakitasMade) || 0,
+            lastSavedAt: uRow.lastSavedAt || 0
+          };
+        }
+      } catch (e) {}
+    }
+
     return new Response(JSON.stringify({
       success: true,
       hardwareOwner,
       topPlayer,
+      currentUser: currentUserData,
       _storage: storageType,
       _d1_connected: !!db,
       _kv_connected: kvConnected,
@@ -1231,18 +1346,36 @@ export async function onRequestPost(context) {
 
   const { kvName, kvConnected, diag } = getKV(env);
   const db = getD1(env);
-  const storageType = (db && kvConnected) ? 'D1+KV (Dual-Engine)' : (db ? 'D1 (Primary)' : (kvConnected ? 'KV (Primary)' : 'Memory'));
+  const storageType = (db && kvConnected) ? 'D1 (Principal) + KV (Backup)' : (db ? 'D1 (Principal)' : (kvConnected ? 'KV (Secundário)' : 'Memória'));
 
   let usersList = await loadUsersList(env);
   const clientUserId = body.userId || url.searchParams.get('clientUserId');
   const clientUserName = body.userName || url.searchParams.get('clientUserName');
 
-  // Auto-reconciliação defensiva no POST
+  // Auto-reconciliação defensiva no POST via D1
   if (clientUserId && !usersList.some(u => u.id === clientUserId)) {
-    const { kv } = getKV(env);
     let meta = null;
-    if (kv) {
-      try { meta = await kv.get(`user_meta:${clientUserId}`, { type: 'json' }); } catch (e) {}
+    if (db) {
+      try {
+        await ensureD1Tables(db);
+        const d1Row = await db.prepare('SELECT id, name, created_at as createdAt, last_saved_at as lastSavedAt, makitas, total_makitas_made as totalMakitasMade FROM users WHERE id = ?').bind(clientUserId).first();
+        if (d1Row) {
+          meta = {
+            id: d1Row.id,
+            name: sanitizeNick(d1Row.name || clientUserName || 'Maker'),
+            createdAt: d1Row.createdAt || Date.now(),
+            lastSavedAt: d1Row.lastSavedAt || Date.now(),
+            makitas: Number(d1Row.makitas) || 0,
+            totalMakitasMade: Number(d1Row.totalMakitasMade) || Number(d1Row.makitas) || 0
+          };
+        }
+      } catch (e) {}
+    }
+    if (!meta) {
+      const { kv } = getKV(env);
+      if (kv) {
+        try { meta = await kv.get(`user_meta:${clientUserId}`, { type: 'json' }); } catch (e) {}
+      }
     }
     if (!meta) {
       meta = {
@@ -1255,8 +1388,8 @@ export async function onRequestPost(context) {
       };
     }
     usersList.push(meta);
-    await saveUsersList(env, usersList);
-    await saveUserMeta(env, meta);
+    await saveUsersList(env, usersList, true);
+    await saveUserMeta(env, meta, true);
   }
 
   let topPlayer = getTopPlayer(usersList);
@@ -1266,10 +1399,26 @@ export async function onRequestPost(context) {
   // AÇÕES DE CONTROLE DO CONSOLE FÍSICO (ESP8266)
   // -------------------------------------------------------------
   if (action === 'get_hardware_status') {
+    let currentUserData = null;
+    const reqUserId = body.userId || clientUserId;
+    if (reqUserId && db) {
+      try {
+        const uRow = await db.prepare('SELECT makitas, total_makitas_made as totalMakitasMade, last_saved_at as lastSavedAt FROM users WHERE id = ?').bind(reqUserId).first();
+        if (uRow) {
+          currentUserData = {
+            makitas: Number(uRow.makitas) || 0,
+            totalMakitasMade: Number(uRow.totalMakitasMade) || 0,
+            lastSavedAt: uRow.lastSavedAt || 0
+          };
+        }
+      } catch (e) {}
+    }
+
     return new Response(JSON.stringify({
       success: true,
       hardwareOwner,
       topPlayer,
+      currentUser: currentUserData,
       _storage: storageType,
       _d1_connected: !!db,
       _kv_connected: kvConnected,
@@ -1394,9 +1543,9 @@ export async function onRequestPost(context) {
 
     const initialState = getDefaultState();
     initialState.name = finalUser.name;
-    await saveUserState(env, userId, initialState, finalUser.name);
-    await saveUserMeta(env, finalUser);
-    await saveUsersList(env, usersList);
+    await saveUserState(env, userId, initialState, finalUser.name, true);
+    await saveUserMeta(env, finalUser, true);
+    await saveUsersList(env, usersList, true);
     topPlayer = getTopPlayer(usersList);
 
     return new Response(JSON.stringify({
@@ -1501,14 +1650,15 @@ export async function onRequestPost(context) {
       userEntry.name = resolvedName;
     }
 
+    const isManualSave = body.manual === true;
     expanded.name = resolvedName;
-    await saveUserState(env, userId, expanded, resolvedName);
+    await saveUserState(env, userId, expanded, resolvedName, isManualSave);
 
-    // Economia estrita de cota KV: só grava USERS_LIST_KEY se for novo usuário, renomeado ou superou o líder
+    // No D1 o ranking e sempre atualizado em tempo real. No KV secundario atualiza com throttling
     const isNewLeader = expanded.totalMakitasMade > (topPlayer?.totalMakitasMade || 0);
-    if (isNewUserInList || dedupChanged || isNewLeader) {
-      await saveUsersList(env, usersList);
-      await saveUserMeta(env, userEntry);
+    if (isNewUserInList || dedupChanged || isNewLeader || isManualSave) {
+      await saveUsersList(env, usersList, isManualSave);
+      await saveUserMeta(env, userEntry, isManualSave);
     }
     topPlayer = getTopPlayer(usersList);
 
@@ -1980,14 +2130,14 @@ export async function onRequestPost(context) {
       targetState.makitas = (targetState.makitas || 0) + totalGain;
       targetState.totalMakitasMade = (targetState.totalMakitasMade || 0) + totalGain;
       targetState.lastSavedAt = now;
-      await saveUserState(env, targetUserId, targetState);
+      await saveUserState(env, targetUserId, targetState, null, false);
 
       const uIdx = usersList.findIndex(u => u.id === targetUserId);
       if (uIdx >= 0) {
         usersList[uIdx].makitas = targetState.makitas;
         usersList[uIdx].totalMakitasMade = targetState.totalMakitasMade;
         usersList[uIdx].lastSavedAt = now;
-        await saveUsersList(env, usersList);
+        await saveUsersList(env, usersList, false);
       }
       topPlayer = getTopPlayer(usersList);
     }
@@ -1999,7 +2149,7 @@ export async function onRequestPost(context) {
     state.espTelemetry.activeTargetUserId = targetUserId || '';
     state.espTelemetry.activeTargetName = resolvedTargetName;
     state.lastUpdate = now;
-    await saveState(env, state);
+    await saveState(env, state, false);
 
     // Resposta compacta e leve para o ESP8266 (elimina engasgos e cabe perfeitamente no buffer RX TLS)
     return new Response(JSON.stringify({
@@ -2025,7 +2175,8 @@ export async function onRequestPost(context) {
         remainingSec: hardwareOwner?.remainingSec || 0
       },
       lastResetExecutedAt: state.lastResetExecutedAt || 0,
-      resetOrder: false
+      resetOrder: false,
+      _storage: storageType
     }), {
       status: 200,
       headers: CORS_HEADERS

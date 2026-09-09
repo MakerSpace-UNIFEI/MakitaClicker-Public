@@ -36,7 +36,7 @@ web/
   1. *Camada de Simulação Contínua:* `gameLoop` fluido com `requestAnimationFrame` na taxa nativa do monitor, calculando produção passiva pelo delta de tempo (`dt`).
   2. *Camada de Renderização Throttled:* Executa a ~6 FPS para botões de compra, mantendo uso de CPU desprezível.
   3. *Camada de Perfis e Persistência Local:* Armazena o save isolado em `localStorage` sob `makita_clicker_state_<userId>` e perfil ativo em `makita_clicker_profile_id`.
-  4. *Camada de Sincronização Cloud (Dual-Engine D1 + KV):* Auto-save a cada 3 minutos, salvamento manual com feedback visual e guarda `beforeunload` para progresso não salvo há mais de 5 minutos.
+  4. *Camada de Sincronização Cloud D1-Primary (D1 + KV Backup):* Auto-save frequente a cada 15 segundos no D1, debouncing em compras (2-3s) e cliques (5s), salvamento manual com feedback visual e guarda `beforeunload` para progresso não salvo.
   5. *Camada de Resiliência de Perfis:* Auto-upload transparente de perfis locais ausentes na nuvem.
   6. *Camada de Telemetria e Hardware Lease:* Reivindicação do console físico ("Tomar ESP"), contagem regressiva de posse e monitoramento em tempo real do microcontrolador físico.
   7. *Camada Anti-AutoClicker:* Bloqueio por 5 minutos em caso de CPS > 28 ou automação mecânica.

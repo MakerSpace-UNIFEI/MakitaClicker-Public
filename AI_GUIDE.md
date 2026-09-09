@@ -19,25 +19,27 @@ O projeto é um jogo incremental (Cookie Clicker) **híbrido** (Físico + Web).
 - **Sistema de Nomes e Sanitização:** O apelido do jogador passa por `sanitizeNick()`, que remove acentos, cedilhas (`ç`), caracteres ordinais (`º`, `ª`) e caracteres de controle, restringindo a `[a-zA-Z0-9 _-]` com comprimento máximo de 16 caracteres para caber com segurança no display LCD 20x4 do hardware.
 - **Desduplicação Automática:** Perfis com mesmo nome raiz recebem sufixos automáticos ordenados por data de criação (`Pedro`, `Pedro 2`, `Pedro 3`...). O nome mais antigo é preservado.
 - **Auto-Upload & Recuperação de Perfis Locais:** Se o navegador contiver um perfil em `localStorage` que ainda não foi registrado na nuvem (ex: criado offline ou mobile), o frontend detecta (`userFound: false` na resposta `/api/state?userId=<id>`) e dispara automaticamente a criação (`create_user`) e o salvamento (`save_user_state`) com todo o progresso acumulado.
-- **Salvamento na Nuvem:** O progresso sincroniza na nuvem com D1/KV a cada 3 minutos (auto-save) ou via botão manual ("💾 Salvar na Nuvem").
+- **Salvamento na Nuvem:** O progresso sincroniza na nuvem com o D1 como banco primário a cada 15 segundos (auto-save) e via debounced saves em compras (2-3s) ou botão manual ("💾 Salvar na Nuvem"), com o KV atuando como backup secundário (throttled a cada 60s).
 - **Posse do Console Físico (Hardware Lease):** Qualquer jogador pode tentar tomar a posse da ESP física clicando em "Tomar ESP" (ação `claim_hardware`), garantindo 180 segundos de exclusividade. O display LCD reflete o dono temporário e a contagem regressiva em tempo real.
 - **Produção Offline (Teto de 24h):** O cliente salva continuamente a marca temporal de atividade (`lastOnline`). Ao carregar o perfil ou ao retornar à aba (`visibilitychange`), se o tempo ausente for $\ge 15\text{s}$, calcula os ganhos offline ($\text{MPS} \times \Delta t$, limitado a 24h) e exibe o modal `#offlineProgressModal`. No backend, `advancePassiveProduction` também respeita o limite de 24 horas e informa `offlineGain` na rota GET de perfil.
 - **Proteção contra Perda de Progresso:** Um listener `beforeunload` avisa o jogador caso ele tente fechar o navegador com progresso local não salvo há mais de 5 minutos.
 - **Proteção Anti-AutoClicker (Ban de 5 min por IP):** O cliente detecta cliques sintéticos (`isTrusted=false`), CPS desumano (>28 CPS) e variância robótica. Ao detectar, suspende o IP por 5 minutos gravando na tabela `ip_bans` (D1) e na chave `ban:ip:<clientIp>` (KV com TTL 300s). A placa física ESP8266 (`source: esp`) é estritamente imune.
 
-### Backend (Dual-Engine D1 + KV, Desduplicação e Otimização para ESP)
+### Backend (D1-Primary Authoritative + KV Secondary Backup)
 - **Sincronismo Assíncrono:** O Frontend e a ESP enviam dados via POST para `/api/state`.
-- **Armazenamento Dual-Engine:**
-  - **Cloudflare D1 (SQL Primário):**
-    - `users`: ID, nome original, saldo de makitas, timestamps de criação e último acesso.
+- **Armazenamento D1-Primary (com KV Backup Throttled):**
+  - **Cloudflare D1 (SQL Primário Autoritativo - 100k writes/dia, 5M reads/dia):**
+    - `users`: ID, nome desduplicado, saldo de makitas, timestamps de criação e último acesso.
     - `user_states`: Estado serializado completo em JSON, `reset_epoch` e timestamp de atualização.
+    - `global_state`: Estado global mestre para `gamestate`, telemetria e fila de ordens da ESP8266.
     - `hardware_lease`: Registro único do dono temporário da ESP (`controller_user_id`, `controller_user_name`, `lease_expires_at`).
     - `ip_bans`: Lista de bloqueios temporários de IPs infratores.
-  - **Cloudflare KV (Cache Rápido e Redundância):**
-    - `users:list`: Lista serializada de usuários com nomes desduplicados.
-    - `user:<userId>:state`: Estado individual de jogo do usuário.
-    - `gamestate`: Estado global mantido para telemetria e sincronização do hardware físico.
-    - `hardware:controller`: Snapshot em cache da posse da ESP.
+  - **Cloudflare KV (Backup Secundário com Throttling de 60s):**
+    - Gravações protegidas pelo helper `canWriteToKv()` para nunca estourar a cota gratuita de 1.000 writes/dia do KV.
+    - `users:list`: Backup da lista de usuários.
+    - `user:<userId>:state`: Backup do estado individual de jogo do usuário.
+    - `gamestate`: Backup do estado global.
+    - `hardware:controller`: Backup da posse da ESP.
 - **Serialização Compacta:**
   - `upgrades`: Array denso de 24 inteiros `[q0, q1, ..., q23]`.
   - `perms`: Array esparso contendo os índices numéricos das habilidades desbloqueadas `[0, 1, 4]`.

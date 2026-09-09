@@ -749,7 +749,7 @@ function buildPermTree() {
     });
 }
 
-// ---------- COMPRAS NO CLIENTE (LOCAL-FIRST, SEM SPAM NO KV) ----------
+// ---------- COMPRAS NO CLIENTE (LOCAL-FIRST + D1 SYNC IMEDIATO) ----------
 function buyUpgrade(upgrade) {
     const { qty, cost } = computeBuy(upgrade);
     if (qty <= 0 || makitas < cost) return;
@@ -764,6 +764,7 @@ function buyUpgrade(upgrade) {
 
     saveLocalState();
     updateSaveIndicator();
+    scheduleCloudSaveDebounced(3000);
 }
 
 function buyPermanentUpgrade(perm) {
@@ -785,6 +786,7 @@ function buyPermanentUpgrade(perm) {
 
     saveLocalState();
     updateSaveIndicator();
+    scheduleCloudSaveDebounced(2000);
 }
 
 // ---------- RENDERIZAÇÃO INTELIGENTE E DESACOPLADA ----------
@@ -1260,6 +1262,7 @@ makitaBtn.addEventListener('click', (e) => {
         try { navigator.vibrate(10); } catch (err) {}
     }
     playClickFeedback(gain);
+    scheduleCloudSaveDebounced(5000);
 });
 
 // ---------- RESET TOTAL UNIFICADO ----------
@@ -2395,6 +2398,19 @@ async function createNewProfile(name) {
 let isSavingUserProgress = false;
 let saveRetryTimer = null;
 let saveRetryDelay = 3000;
+let debouncedSaveTimer = null;
+
+function scheduleCloudSaveDebounced(delayMs = 3500) {
+    if (!currentUserId) return;
+    hasUnsavedChanges = true;
+    if (debouncedSaveTimer) clearTimeout(debouncedSaveTimer);
+    debouncedSaveTimer = setTimeout(() => {
+        debouncedSaveTimer = null;
+        if (currentUserId && hasUnsavedChanges) {
+            saveUserProgressToCloud(false);
+        }
+    }, delayMs);
+}
 
 function scheduleSaveRetry() {
     if (saveRetryTimer) return;
@@ -2414,10 +2430,10 @@ async function saveUserProgressToCloud(isManual = false) {
 
     if (isManual && btnSaveCloudEl) {
         btnSaveCloudEl.disabled = true;
-        btnSaveCloudEl.textContent = '⏳ Salvando...';
+        btnSaveCloudEl.textContent = '⏳ Salvando no D1...';
     }
     if (saveStatusTextEl) {
-        saveStatusTextEl.textContent = '🟡 Salvando na Nuvem...';
+        saveStatusTextEl.textContent = '🟡 Sincronizando com D1...';
         saveStatusTextEl.style.color = 'var(--orange)';
     }
 
@@ -2429,7 +2445,8 @@ async function saveUserProgressToCloud(isManual = false) {
         userId: currentUserId,
         userName: currentUserName,
         createdAt: currentUserCreatedAt,
-        state: getCompactGameState()
+        state: getCompactGameState(),
+        manual: isManual
     };
 
     const controller = new AbortController();
@@ -2458,7 +2475,7 @@ async function saveUserProgressToCloud(isManual = false) {
 
         // Se o servidor rejeitou por ser obsoleto em relação a um reset recente
         if (data && data.staleRejected) {
-            console.warn('[SYNC] Servidor rejeitou save por ser mais antigo que o estado atual do KV.');
+            console.warn('[SYNC] Servidor rejeitou save por ser mais antigo que o estado atual do D1/KV.');
             if (data.state) {
                 applyCompactState(data.state);
                 saveLocalState();
@@ -2489,7 +2506,7 @@ async function saveUserProgressToCloud(isManual = false) {
         renderStats();
 
         if (isManual) {
-            showFloatText('💾 Salvo!');
+            showFloatText('💾 Salvo no D1!');
             if (btnSaveCloudEl) {
                 btnSaveCloudEl.disabled = false;
                 btnSaveCloudEl.textContent = '✅ Salvo!';
@@ -2526,12 +2543,12 @@ async function saveUserProgressToCloud(isManual = false) {
     }
 }
 
-// Auto-Save periódico no KV a cada 3 minutos (180.000 ms - econômico para a cota gratuita do KV)
+// Auto-Save frequente no D1 a cada 15 segundos (D1 comporta 100.000 writes/dia!)
 setInterval(() => {
     if (currentUserId && hasUnsavedChanges) {
         saveUserProgressToCloud(false);
     }
-}, 180000);
+}, 15000);
 
 // Indicador visual de tempo decorrido do save atualizado a cada 2s
 setInterval(updateSaveIndicator, 2000);
@@ -2848,11 +2865,12 @@ function initGame() {
         }
     }, 1000); // Atualiza contadores, telemetria, online timestamp e estatísticas a cada segundo
 
-    // Consulta status de posse do console físico a cada 5s para sincronia rápida entre jogadores
+    // Consulta status de posse do console físico e sincronização com D1 a cada 3.5s
     setInterval(async () => {
         if (document.visibilityState !== 'hidden') {
             try {
-                const res = await fetch('/api/state?action=get_hardware_status');
+                const uParam = currentUserId ? `&userId=${encodeURIComponent(currentUserId)}` : '';
+                const res = await fetch(`/api/state?action=get_hardware_status${uParam}&_t=${Date.now()}`);
                 if (res.ok) {
                     const data = await res.json();
                     if (data.hardwareOwner) {
@@ -2861,10 +2879,19 @@ function initGame() {
                     if (data.topPlayer) {
                         latestTopPlayer = data.topPlayer;
                     }
+                    if (data.currentUser && typeof data.currentUser.makitas === 'number') {
+                        if (data.currentUser.makitas > makitas) {
+                            makitas = data.currentUser.makitas;
+                            totalMakitasMade = Math.max(totalMakitasMade, Number(data.currentUser.totalMakitasMade) || makitas);
+                            isDirty = true;
+                            saveLocalState();
+                            renderStats();
+                        }
+                    }
                 }
             } catch (e) {}
         }
-    }, 5000);
+    }, 3500);
 
     // Inicia o motor gráfico irrestrito (suave e fluido)
     requestAnimationFrame(gameLoop);
