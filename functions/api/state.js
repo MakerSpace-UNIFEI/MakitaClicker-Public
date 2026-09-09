@@ -157,6 +157,7 @@ function compactUserState(state) {
     totalMakitasMade: typeof state.totalMakitasMade === 'number' ? state.totalMakitasMade : (state.makitas || 0),
     upgrades: upgradesArr,
     perms: permsArr,
+    saveRev: state.saveRev || 1,
     resetEpoch: state.resetEpoch || 0,
     lastUpdate: state.lastUpdate || Date.now(),
     lastSavedAt: Date.now()
@@ -203,6 +204,7 @@ function expandUserState(raw) {
     totalMakitasMade,
     owned,
     perms,
+    saveRev: raw.saveRev || 1,
     resetEpoch: raw.resetEpoch || 0,
     lastUpdate: raw.lastUpdate || Date.now(),
     lastSavedAt: raw.lastSavedAt || Date.now()
@@ -286,15 +288,46 @@ function advancePassiveProduction(state, now) {
 
 async function loadUsersList(env) {
   const { kv } = getKV(env);
+  let kvUsers = null;
   if (kv) {
     try {
       const data = await kv.get(USERS_LIST_KEY, { type: 'json' });
-      if (Array.isArray(data)) return data;
+      if (Array.isArray(data)) kvUsers = data;
     } catch (err) {
       console.error('[KV] Erro ao ler lista de usuários:', err);
     }
   }
-  return memoryFallbackUsers;
+
+  // Blindagem contra consistência eventual do KV:
+  // Se houver lista em memória e lista no KV, mescla ambas preservando
+  // os usuários mais recentes e as pontuações mais altas.
+  if (Array.isArray(kvUsers) && Array.isArray(memoryFallbackUsers) && memoryFallbackUsers.length > 0) {
+    const map = new Map();
+    kvUsers.forEach(u => { if (u && u.id) map.set(u.id, u); });
+    memoryFallbackUsers.forEach(u => {
+      if (u && u.id) {
+        const existing = map.get(u.id);
+        if (!existing) {
+          map.set(u.id, u);
+        } else {
+          const memScore = u.totalMakitasMade || u.makitas || 0;
+          const kvScore = existing.totalMakitasMade || existing.makitas || 0;
+          if ((u.lastSavedAt || 0) >= (existing.lastSavedAt || 0) || memScore > kvScore) {
+            map.set(u.id, { ...existing, ...u });
+          }
+        }
+      }
+    });
+    const merged = Array.from(map.values());
+    memoryFallbackUsers = merged;
+    return merged;
+  }
+
+  if (Array.isArray(kvUsers)) {
+    memoryFallbackUsers = kvUsers;
+    return kvUsers;
+  }
+  return memoryFallbackUsers || [];
 }
 
 async function saveUsersList(env, list) {
@@ -312,22 +345,55 @@ async function saveUsersList(env, list) {
 async function loadUserState(env, userId) {
   const { kv, name, kvConnected, diag } = getKV(env);
   const key = getUserStateKey(userId);
+  let kvState = null;
   if (kv) {
     try {
       const raw = await kv.get(key, { type: 'json' });
       if (raw && typeof raw === 'object') {
-        const state = expandUserState(raw);
-        return { state, kvName: name, kvConnected: true, kvDiag: diag };
+        kvState = expandUserState(raw);
       }
     } catch (err) {
       console.error(`[KV] Erro ao ler estado do usuário ${userId}:`, err);
     }
   }
-  const fallback = memoryFallbackUserStates[userId] || getDefaultState();
-  return { state: fallback, kvName: name, kvConnected: !!kv, kvDiag: diag };
+
+  const memState = memoryFallbackUserStates[userId];
+
+  // Blindagem contra consistência eventual do Cloudflare KV:
+  // Se o cache de memória deste worker tiver estado com resetEpoch mais recente,
+  // ou revisão/timestamp superior ao que o KV retornou, a memória PREVALECE.
+  let state = kvState || memState || getDefaultState();
+
+  if (kvState && memState) {
+    const memReset = memState.resetEpoch || 0;
+    const kvReset = kvState.resetEpoch || 0;
+    if (memReset !== kvReset) {
+      state = memReset > kvReset ? memState : kvState;
+    } else {
+      const memRev = memState.saveRev || 0;
+      const kvRev = kvState.saveRev || 0;
+      const memTime = Math.max(memState.lastSavedAt || 0, memState.lastUpdate || 0);
+      const kvTime = Math.max(kvState.lastSavedAt || 0, kvState.lastUpdate || 0);
+      if (memRev > kvRev || (memRev === kvRev && memTime >= kvTime)) {
+        state = memState;
+      }
+    }
+  }
+
+  return { state, kvName: name, kvConnected: !!kv, kvDiag: diag };
 }
 
 async function saveUserState(env, userId, state) {
+  const currentMem = memoryFallbackUserStates[userId];
+  if (currentMem) {
+    const memReset = currentMem.resetEpoch || 0;
+    const stateReset = state.resetEpoch || 0;
+    if (memReset > stateReset) {
+      // Rejeita sobrescrita de um reset recente por dados pré-reset
+      return;
+    }
+  }
+
   const { kv } = getKV(env);
   const key = getUserStateKey(userId);
   const compact = compactUserState(state);
@@ -758,6 +824,7 @@ export async function onRequestPost(context) {
     if (typeof statePayload.totalMakitasMade === 'number') {
       expanded.totalMakitasMade = statePayload.totalMakitasMade;
     }
+    expanded.saveRev = Math.max(Number(statePayload.saveRev) || 0, Number(currentState?.saveRev) || 0) + 1;
     expanded.lastSavedAt = now;
     expanded.lastUpdate = now;
     if (currentState && currentState.resetEpoch) {
@@ -779,6 +846,7 @@ export async function onRequestPost(context) {
     return new Response(JSON.stringify({
       success: true,
       lastSavedAt: now,
+      saveRev: expanded.saveRev,
       state: expanded,
       topPlayer,
       hardwareOwner,
@@ -808,6 +876,7 @@ export async function onRequestPost(context) {
     freshState.lastSavedAt = now;
     freshState.lastUpdate = now;
     freshState.resetEpoch = now; // Marca temporal de reset absoluto
+    freshState.saveRev = (currentState?.saveRev || 0) + 10; // Avança a revisão para superar quaisquer saves concorrentes em voo
 
     await saveUserState(env, userId, freshState);
 

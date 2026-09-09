@@ -15,6 +15,9 @@ let currentUserId = null;
 let currentUserName = null;
 let currentUserCreatedAt = null;
 let lastCloudSaveTime = 0;
+let lastLocalSaveTime = 0;
+let currentResetEpoch = 0;
+let currentSaveRev = 1;
 let hasUnsavedChanges = false;
 let totalClicks = 0;
 const sessionStartTime = Date.now();
@@ -122,9 +125,261 @@ if (_btnRefreshRanking) {
     _btnRefreshRanking.addEventListener('click', () => fetchRanking());
 }
 
-// ---------- PERSISTÊNCIA LOCAL (LOCALSTORAGE POR PERFIL) ----------
+// ---------- PERSISTÊNCIA LOCAL (LOCALSTORAGE + BACKUP + COOKIES) ----------
 function getLocalStorageKey() {
     return currentUserId ? `makitaclicker_save_${currentUserId}` : 'makitaclicker_save';
+}
+
+// Persistência em Cookie de redundância (protege contra limpeza do localStorage)
+function saveToCookie(userId, saveObj) {
+    if (!userId || !saveObj) return;
+    try {
+        const compactCookie = {
+            m: Math.round((Number(saveObj.makitas) || 0) * 10) / 10,
+            t: Math.round((Number(saveObj.totalMakitasMade) || 0) * 10) / 10,
+            c: saveObj.totalClicks || 0,
+            u: saveObj.upgrades || [],
+            p: saveObj.perms || [],
+            e: saveObj.resetEpoch || 0,
+            r: saveObj.saveRev || 1,
+            ts: saveObj.lastSavedAt || Date.now()
+        };
+        const jsonStr = JSON.stringify(compactCookie);
+        const cookieVal = encodeURIComponent(jsonStr);
+        document.cookie = `makita_ck_${userId}=${cookieVal}; path=/; max-age=31536000; SameSite=Lax`;
+    } catch (e) {}
+}
+
+function loadFromCookie(userId) {
+    if (!userId) return null;
+    try {
+        const name = `makita_ck_${userId}=`;
+        const decodedCookie = decodeURIComponent(document.cookie || '');
+        const parts = decodedCookie.split(';');
+        for (let i = 0; i < parts.length; i++) {
+            const part = parts[i].trim();
+            if (part.indexOf(name) === 0) {
+                const jsonStr = part.substring(name.length);
+                const p = JSON.parse(jsonStr);
+                return {
+                    makitas: p.m || 0,
+                    totalMakitasMade: p.t || 0,
+                    totalClicks: p.c || 0,
+                    upgrades: p.u || [],
+                    perms: p.p || [],
+                    resetEpoch: p.e || 0,
+                    saveRev: p.r || 1,
+                    lastSavedAt: p.ts || 0,
+                    lastUpdate: p.ts || 0
+                };
+            }
+        }
+    } catch (e) {}
+    return null;
+}
+
+function clearCookie(userId) {
+    if (!userId) return;
+    try {
+        document.cookie = `makita_ck_${userId}=; path=/; max-age=0; SameSite=Lax`;
+    } catch (e) {}
+}
+
+// Custo total cumulativo de N unidades de uma oficina (soma da progressão geométrica de custos)
+function calculateCumulativeUpgradeCost(upgrade, count) {
+    if (!count || count <= 0) return 0;
+    let sum = 0;
+    for (let i = 0; i < count; i++) {
+        sum += Math.ceil(upgrade.baseCost * Math.pow(upgrade.growth, i));
+    }
+    return sum;
+}
+
+// Patrimônio Líquido Acumulado Total:
+// Mede a verdadeira quantidade de valor gerado pelo jogador,
+// somando o saldo atual de makitas + tudo o que foi investido em oficinas + tudo o que foi investido em habilidades.
+// Isso impede que um jogador que acabou de gastar makitas comprando upgrades pareça ter "menos progresso" que uma versão antiga.
+function calculateTotalProgressScore(stateObj) {
+    if (!stateObj) return 0;
+    const currentMkt = Number(stateObj.makitas) || 0;
+    const totalMade = Number(stateObj.totalMakitasMade) || 0;
+
+    let investedUpgrades = 0;
+    upgrades.forEach((u, idx) => {
+        let count = 0;
+        if (stateObj.owned && typeof stateObj.owned[u.id] === 'number') {
+            count = stateObj.owned[u.id];
+        } else if (Array.isArray(stateObj.upgrades) && typeof stateObj.upgrades[idx] === 'number') {
+            count = stateObj.upgrades[idx];
+        }
+        if (count > 0) {
+            investedUpgrades += calculateCumulativeUpgradeCost(u, count);
+        }
+    });
+
+    let investedPerms = 0;
+    permanentUpgrades.forEach((p, idx) => {
+        let isPurchased = false;
+        if (stateObj.perms && typeof stateObj.perms === 'object') {
+            if (Array.isArray(stateObj.perms)) {
+                isPurchased = stateObj.perms.includes(idx);
+            } else {
+                isPurchased = stateObj.perms[p.id] === true;
+            }
+        }
+        if (isPurchased) {
+            investedPerms += p.cost;
+        }
+    });
+
+    const netWorth = currentMkt + investedUpgrades + investedPerms;
+    return Math.max(totalMade, netWorth);
+}
+
+function countTotalUpgrades(stateObj) {
+    if (!stateObj) return 0;
+    let sum = 0;
+    if (stateObj.owned && typeof stateObj.owned === 'object') {
+        for (const k in stateObj.owned) {
+            sum += (Number(stateObj.owned[k]) || 0);
+        }
+    } else if (Array.isArray(stateObj.upgrades)) {
+        for (const val of stateObj.upgrades) {
+            sum += (Number(val) || 0);
+        }
+    }
+    return sum;
+}
+
+function countTotalPerms(stateObj) {
+    if (!stateObj) return 0;
+    if (Array.isArray(stateObj.perms)) {
+        return stateObj.perms.length;
+    }
+    if (stateObj.perms && typeof stateObj.perms === 'object') {
+        return Object.values(stateObj.perms).filter(Boolean).length;
+    }
+    return 0;
+}
+
+// Compara o progresso entre dois estados (ex: Local vs Nuvem)
+// Retorna 1 se A for superior, -1 se B for superior, 0 se equivalentes
+function compareProgress(stateA, stateB) {
+    if (!stateA && !stateB) return 0;
+    if (!stateA) return -1;
+    if (!stateB) return 1;
+
+    // 1. Prioridade absoluta: resetEpoch (se houve reset explícito)
+    const resetA = Number(stateA.resetEpoch) || 0;
+    const resetB = Number(stateB.resetEpoch) || 0;
+    if (resetA !== resetB) {
+        return resetA > resetB ? 1 : -1;
+    }
+
+    // 2. Score total de patrimônio (makitas geradas e investidas)
+    const scoreA = calculateTotalProgressScore(stateA);
+    const scoreB = calculateTotalProgressScore(stateB);
+    const scoreDiff = scoreA - scoreB;
+    if (Math.abs(scoreDiff) >= 1) {
+        return scoreDiff > 0 ? 1 : -1;
+    }
+
+    // 3. Desempate por quantidade de habilidades desbloqueadas na árvore
+    const permsA = countTotalPerms(stateA);
+    const permsB = countTotalPerms(stateB);
+    if (permsA !== permsB) {
+        return permsA > permsB ? 1 : -1;
+    }
+
+    // 4. Desempate por quantidade total de oficinas compradas
+    const upgradesA = countTotalUpgrades(stateA);
+    const upgradesB = countTotalUpgrades(stateB);
+    if (upgradesA !== upgradesB) {
+        return upgradesA > upgradesB ? 1 : -1;
+    }
+
+    // 5. Desempate por revisão monotônica
+    const revA = Number(stateA.saveRev) || 0;
+    const revB = Number(stateB.saveRev) || 0;
+    if (revA !== revB) {
+        return revA > revB ? 1 : -1;
+    }
+
+    // 6. Desempate por timestamp
+    const timeA = Math.max(Number(stateA.lastSavedAt) || 0, Number(stateA.lastUpdate) || 0);
+    const timeB = Math.max(Number(stateB.lastSavedAt) || 0, Number(stateB.lastUpdate) || 0);
+    if (timeA !== timeB) {
+        return timeA > timeB ? 1 : -1;
+    }
+
+    return 0;
+}
+
+// Mescla defensiva (CRDT): se a nuvem tiver algum upgrade ou tecnologia que o local não tem,
+// incorpora sem sobrescrever o saldo ou progresso local superior.
+function mergeSafeIntoLocal(cloudData) {
+    if (!cloudData) return;
+    let changed = false;
+
+    // Upgrades: mantém sempre o máximo (CRDT)
+    if (Array.isArray(cloudData.upgrades)) {
+        upgrades.forEach((u, idx) => {
+            const cVal = cloudData.upgrades[idx] || 0;
+            if (cVal > (owned[u.id] || 0)) {
+                owned[u.id] = cVal;
+                changed = true;
+            }
+        });
+    } else if (cloudData.owned && typeof cloudData.owned === 'object') {
+        upgrades.forEach(u => {
+            const cVal = cloudData.owned[u.id] || 0;
+            if (cVal > (owned[u.id] || 0)) {
+                owned[u.id] = cVal;
+                changed = true;
+            }
+        });
+    }
+
+    // Perms: se a nuvem desbloqueou alguma perm adicional, incorpora
+    if (Array.isArray(cloudData.perms)) {
+        permanentUpgrades.forEach((p, idx) => {
+            if (cloudData.perms.includes(idx) && !p.purchased) {
+                p.purchased = true;
+                changed = true;
+            }
+        });
+    } else if (cloudData.perms && typeof cloudData.perms === 'object') {
+        permanentUpgrades.forEach(p => {
+            if (cloudData.perms[p.id] === true && !p.purchased) {
+                p.purchased = true;
+                changed = true;
+            }
+        });
+    }
+
+    // Total makitas made: preserva o maior
+    if (typeof cloudData.totalMakitasMade === 'number' && cloudData.totalMakitasMade > totalMakitasMade) {
+        totalMakitasMade = cloudData.totalMakitasMade;
+        changed = true;
+    }
+
+    // Reset epoch
+    if (typeof cloudData.resetEpoch === 'number' && cloudData.resetEpoch > currentResetEpoch) {
+        currentResetEpoch = cloudData.resetEpoch;
+        changed = true;
+    }
+
+    // Save rev
+    if (typeof cloudData.saveRev === 'number' && cloudData.saveRev > currentSaveRev) {
+        currentSaveRev = cloudData.saveRev;
+    }
+
+    if (changed) {
+        mps = calculateLocalMps();
+        serverClickPower = calculateLocalClickPower();
+        isDirty = true;
+        renderUI();
+    }
 }
 
 function getCompactGameState() {
@@ -139,6 +394,9 @@ function getCompactGameState() {
         totalClicks,
         upgrades: upgradesArr,
         perms: permsArr,
+        resetEpoch: currentResetEpoch,
+        saveRev: currentSaveRev,
+        lastSavedAt: lastLocalSaveTime || Date.now(),
         lastUpdate: Date.now()
     };
 }
@@ -153,6 +411,15 @@ function applyCompactState(data) {
     }
     if (typeof data.totalClicks === 'number') {
         totalClicks = data.totalClicks;
+    }
+    if (typeof data.resetEpoch === 'number') {
+        currentResetEpoch = Math.max(currentResetEpoch, data.resetEpoch);
+    }
+    if (typeof data.saveRev === 'number') {
+        currentSaveRev = Math.max(currentSaveRev, data.saveRev);
+    }
+    if (typeof data.lastSavedAt === 'number') {
+        lastLocalSaveTime = Math.max(lastLocalSaveTime, data.lastSavedAt);
     }
     if (Array.isArray(data.upgrades)) {
         upgrades.forEach((u, idx) => {
@@ -180,28 +447,72 @@ function applyCompactState(data) {
 
 function saveLocalState() {
     try {
+        lastLocalSaveTime = Date.now();
         const saveObj = getCompactGameState();
         saveObj.name = currentUserName;
         saveObj.createdAt = currentUserCreatedAt;
         saveObj.lastCloudSaveTime = lastCloudSaveTime;
-        localStorage.setItem(getLocalStorageKey(), JSON.stringify(saveObj));
+        saveObj.lastSavedAt = lastLocalSaveTime;
+
+        const jsonStr = JSON.stringify(saveObj);
+        localStorage.setItem(getLocalStorageKey(), jsonStr);
+        if (currentUserId) {
+            localStorage.setItem(`makita_backup_${currentUserId}`, jsonStr);
+            saveToCookie(currentUserId, saveObj);
+        }
     } catch (e) {
-        // LocalStorage desabilitado ou cheio
+        // Se localStorage falhar, tenta gravar no cookie
+        if (currentUserId) {
+            try {
+                saveToCookie(currentUserId, getCompactGameState());
+            } catch (err) {}
+        }
     }
 }
 
 function loadLocalState() {
     try {
-        const raw = localStorage.getItem(getLocalStorageKey());
-        if (!raw) return false;
-        const data = JSON.parse(raw);
-        applyCompactState(data);
-        if (data.createdAt) {
-            currentUserCreatedAt = data.createdAt;
+        let bestCandidate = null;
+
+        // 1. Tenta ler localStorage primário
+        const rawPrimary = localStorage.getItem(getLocalStorageKey());
+        if (rawPrimary) {
+            try { bestCandidate = JSON.parse(rawPrimary); } catch (e) {}
         }
-        if (typeof data.lastCloudSaveTime === 'number' && data.lastCloudSaveTime > 0) {
-            lastCloudSaveTime = data.lastCloudSaveTime;
+
+        // 2. Tenta ler localStorage de backup
+        if (currentUserId) {
+            const rawBackup = localStorage.getItem(`makita_backup_${currentUserId}`);
+            if (rawBackup) {
+                try {
+                    const parsedBackup = JSON.parse(rawBackup);
+                    if (!bestCandidate || compareProgress(parsedBackup, bestCandidate) > 0) {
+                        bestCandidate = parsedBackup;
+                    }
+                } catch (e) {}
+            }
+
+            // 3. Tenta ler Cookie de redundância
+            const cookieCandidate = loadFromCookie(currentUserId);
+            if (cookieCandidate) {
+                if (!bestCandidate || compareProgress(cookieCandidate, bestCandidate) > 0) {
+                    bestCandidate = cookieCandidate;
+                }
+            }
         }
+
+        if (!bestCandidate) return false;
+
+        applyCompactState(bestCandidate);
+        if (bestCandidate.createdAt) {
+            currentUserCreatedAt = bestCandidate.createdAt;
+        }
+        if (typeof bestCandidate.lastCloudSaveTime === 'number' && bestCandidate.lastCloudSaveTime > 0) {
+            lastCloudSaveTime = bestCandidate.lastCloudSaveTime;
+        }
+
+        // Se o backup ou cookie tinha dados mais avançados, sincroniza de volta ao armazenamento primário
+        saveLocalState();
         return true;
     } catch (e) {
         return false;
@@ -757,6 +1068,18 @@ makitaBtn.addEventListener('click', () => {
 
 // ---------- RESET TOTAL UNIFICADO ----------
 function resetAllProgress(sendToServer = true) {
+    const now = Date.now();
+    currentResetEpoch = now;
+    currentSaveRev = (currentSaveRev || 1) + 10;
+    lastLocalSaveTime = now;
+
+    if (currentUserId) {
+        clearCookie(currentUserId);
+        try {
+            localStorage.removeItem(`makita_backup_${currentUserId}`);
+        } catch (e) {}
+    }
+
     try {
         localStorage.removeItem(getLocalStorageKey());
         localStorage.removeItem('makitaclicker_save');
@@ -776,7 +1099,7 @@ function resetAllProgress(sendToServer = true) {
     serverClickPower = 1.0;
     isDirty = true;
     hasUnsavedChanges = false;
-    lastCloudSaveTime = Date.now();
+    lastCloudSaveTime = now;
 
     saveLocalState();
 
@@ -1545,11 +1868,39 @@ function selectProfile(user) {
 
 async function fetchUserProfileState(userId) {
     try {
-        const res = await fetch(`/api/state?userId=${encodeURIComponent(userId)}`);
+        const res = await fetch(`/api/state?userId=${encodeURIComponent(userId)}&_t=${Date.now()}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        applyCompactState(data);
-        saveLocalState();
+
+        // 1. Constrói representação do estado local atual
+        const currentLocal = getCompactGameState();
+
+        // 2. Compara progresso entre Local e Nuvem considerando patrimônio total (makitas + oficinas + árvore)
+        const cmp = compareProgress(currentLocal, data);
+
+        if (cmp > 0) {
+            // O LOCAL É MAIOR/MAIS AVANÇADO QUE A NUVEM!
+            // O local prevalece e atualiza a nuvem com os dados superiores locais
+            console.log('[SYNC] Progresso local é MAIOR que a nuvem. Local prevalece.');
+            logEl.textContent = '⚡ Progresso local mais avançado que a nuvem. Sincronizando com a nuvem...';
+            logEl.style.color = 'var(--teal)';
+
+            mergeSafeIntoLocal(data);
+            saveLocalState();
+            // Dispara envio para a nuvem para atualizar o KV defasado
+            saveUserProgressToCloud(false);
+        } else if (cmp < 0) {
+            // A NUVEM É MAIS AVANÇADA
+            console.log('[SYNC] Nuvem possui progresso mais avançado. Adotando dados da nuvem.');
+            applyCompactState(data);
+            saveLocalState();
+            hasUnsavedChanges = false;
+        } else {
+            // Equivalentes: mescla defensivamente sem sobrescrever
+            mergeSafeIntoLocal(data);
+            saveLocalState();
+        }
+
         if (typeof data.lastSavedAt === 'number' && data.lastSavedAt > 0) {
             lastCloudSaveTime = data.lastSavedAt;
         } else {
@@ -1561,9 +1912,9 @@ async function fetchUserProfileState(userId) {
         if (data.hardwareOwner) {
             setLatestHardwareOwner(data.hardwareOwner);
         }
-        hasUnsavedChanges = false;
         updateSaveIndicator();
         renderStats();
+        updateHardwareUI();
     } catch (e) {
         console.warn('Erro ao carregar estado do perfil na nuvem:', e);
     }
@@ -1612,6 +1963,9 @@ async function saveUserProgressToCloud(isManual = false) {
         saveStatusTextEl.style.color = 'var(--orange)';
     }
 
+    currentSaveRev++;
+    lastLocalSaveTime = Date.now();
+
     const payload = {
         action: 'save_user_state',
         userId: currentUserId,
@@ -1626,7 +1980,21 @@ async function saveUserProgressToCloud(isManual = false) {
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        lastCloudSaveTime = Date.now();
+
+        // Se o servidor rejeitou por ser obsoleto em relação a um reset recente
+        if (data && data.staleRejected) {
+            console.warn('[SYNC] Servidor rejeitou save por ser mais antigo que o estado atual do KV.');
+            if (data.state) {
+                applyCompactState(data.state);
+                saveLocalState();
+            }
+            return;
+        }
+
+        lastCloudSaveTime = typeof data.lastSavedAt === 'number' ? data.lastSavedAt : Date.now();
+        if (data && typeof data.saveRev === 'number') {
+            currentSaveRev = Math.max(currentSaveRev, data.saveRev);
+        }
         hasUnsavedChanges = false;
 
         if (data && data.topPlayer) {
