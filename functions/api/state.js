@@ -444,10 +444,8 @@ function advancePassiveProduction(state, now) {
   const rawDt = Math.max(0, (now - last) / 1000.0);
   const dt = Math.min(86400, rawDt); // Limite máximo de 24 horas (86.400s)
   const calculatedMps = calculateMps(state.owned, state.perms);
-  if ((!state.mps || state.mps <= 0) && calculatedMps > 0) {
-    state.mps = calculatedMps;
-  }
-  const currentMps = state.mps || calculatedMps || 0;
+  state.mps = calculatedMps;
+  const currentMps = state.mps;
   if (dt > 0 && currentMps > 0) {
     const gain = currentMps * dt;
     state.makitas = (state.makitas || 0) + gain;
@@ -517,6 +515,13 @@ function deduplicateUserNames(list) {
     usedNames.add(candidate.toLowerCase());
   }
 
+  // 2. Re-ordena o ranking por totalMakitasMade decrescente antes de retornar
+  sorted.sort((a, b) => {
+    const scoreA = typeof a.totalMakitasMade === 'number' ? a.totalMakitasMade : (Number(a.makitas) || 0);
+    const scoreB = typeof b.totalMakitasMade === 'number' ? b.totalMakitasMade : (Number(b.makitas) || 0);
+    return scoreB - scoreA;
+  });
+
   return { list: sorted, changed };
 }
 
@@ -533,7 +538,7 @@ async function saveUserMeta(env, userEntry, forceKv = false) {
           name = CASE WHEN excluded.name != '' AND excluded.name != 'Maker' THEN excluded.name ELSE users.name END,
           last_saved_at = excluded.last_saved_at,
           makitas = excluded.makitas,
-          total_makitas_made = excluded.total_makitas_made
+          total_makitas_made = MAX(users.total_makitas_made, excluded.total_makitas_made)
       `).bind(
         userEntry.id,
         userEntry.name || 'Maker',
@@ -658,9 +663,15 @@ async function saveUsersList(env, list, forceKv = false) {
       await ensureD1Tables(db);
       for (const u of list) {
         if (u && u.id) {
-          await db.prepare(
-            'INSERT OR REPLACE INTO users (id, name, created_at, last_saved_at, makitas, total_makitas_made) VALUES (?, ?, ?, ?, ?, ?)'
-          ).bind(
+          await db.prepare(`
+            INSERT INTO users (id, name, created_at, last_saved_at, makitas, total_makitas_made)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              name = CASE WHEN excluded.name != '' AND excluded.name != 'Maker' THEN excluded.name ELSE users.name END,
+              last_saved_at = excluded.last_saved_at,
+              makitas = excluded.makitas,
+              total_makitas_made = MAX(users.total_makitas_made, excluded.total_makitas_made)
+          `).bind(
             u.id,
             u.name || 'Maker',
             u.createdAt || Date.now(),
@@ -793,8 +804,8 @@ async function saveUserState(env, userId, state, userName = null, forceKv = fals
             name = CASE WHEN excluded.name != '' AND excluded.name != 'Maker' THEN excluded.name ELSE users.name END,
             last_saved_at = excluded.last_saved_at,
             makitas = excluded.makitas,
-            total_makitas_made = excluded.total_makitas_made
-        `).bind(userId, resolvedName, createdAt, now, Number(state.makitas) || 0, Number(state.totalMakitasMade) || 0),
+            total_makitas_made = CASE WHEN ? > 0 THEN excluded.total_makitas_made ELSE MAX(users.total_makitas_made, excluded.total_makitas_made) END
+        `).bind(userId, resolvedName, createdAt, now, Number(state.makitas) || 0, Number(state.totalMakitasMade) || 0, resetEpoch),
         db.prepare(`
           INSERT INTO user_states (user_id, state_json, save_rev, reset_epoch, updated_at)
           VALUES (?, ?, ?, ?, ?)
@@ -1475,6 +1486,36 @@ export async function onRequestPost(context) {
 
     await saveHardwareLease(env, newLease);
 
+    // Se o cliente enviou o estado atual junto com a reivindicação, persiste imediatamente no D1!
+    if (body.state && typeof body.state === 'object') {
+      const expanded = expandUserState(body.state);
+      expanded.name = userName;
+      expanded.lastSavedAt = now;
+      expanded.lastUpdate = now;
+      await saveUserState(env, userId, expanded, userName, true);
+
+      const uIdx = usersList.findIndex(u => u.id === userId);
+      if (uIdx >= 0) {
+        usersList[uIdx].name = userName;
+        usersList[uIdx].makitas = expanded.makitas;
+        usersList[uIdx].totalMakitasMade = expanded.totalMakitasMade;
+        usersList[uIdx].lastSavedAt = now;
+      } else {
+        usersList.push({
+          id: userId,
+          name: userName,
+          createdAt: Number(body.createdAt) || now,
+          lastSavedAt: now,
+          makitas: expanded.makitas,
+          totalMakitasMade: expanded.totalMakitasMade
+        });
+      }
+      const { list: dedupedUsers } = deduplicateUserNames(usersList);
+      usersList = dedupedUsers;
+      await saveUsersList(env, usersList, true);
+      topPlayer = getTopPlayer(usersList);
+    }
+
     const activeOwner = {
       ...newLease,
       active: true,
@@ -1654,12 +1695,9 @@ export async function onRequestPost(context) {
     expanded.name = resolvedName;
     await saveUserState(env, userId, expanded, resolvedName, isManualSave);
 
-    // No D1 o ranking e sempre atualizado em tempo real. No KV secundario atualiza com throttling
-    const isNewLeader = expanded.totalMakitasMade > (topPlayer?.totalMakitasMade || 0);
-    if (isNewUserInList || dedupChanged || isNewLeader || isManualSave) {
-      await saveUsersList(env, usersList, isManualSave);
-      await saveUserMeta(env, userEntry, isManualSave);
-    }
+    // Atualiza o ranking em tempo real no D1 (e no KV com throttling interno de 60s)
+    await saveUsersList(env, usersList, isManualSave);
+    await saveUserMeta(env, userEntry, isManualSave);
     topPlayer = getTopPlayer(usersList);
 
     return new Response(JSON.stringify({
@@ -2092,7 +2130,8 @@ export async function onRequestPost(context) {
         topPlayer: {
           id: topPlayer?.id || '',
           name: topPlayer?.name || 'MakerSpace',
-          makitas: topPlayer?.makitas || 0
+          makitas: topPlayer?.makitas || 0,
+          totalMakitasMade: topPlayer?.totalMakitasMade || 0
         },
         hardwareOwner: {
           active: !!hardwareOwner?.active,
@@ -2124,11 +2163,25 @@ export async function onRequestPost(context) {
     }
     advancePassiveProduction(targetState, now);
 
-    if (clicks > 0 && targetUserId) {
-      const gainPerClick = getSingleClickGain(targetState.perms, targetState.mps);
-      const totalGain = gainPerClick * clicks;
-      targetState.makitas = (targetState.makitas || 0) + totalGain;
-      targetState.totalMakitasMade = (targetState.totalMakitasMade || 0) + totalGain;
+    if (typeof body.totalMakitasMade === 'number' && body.totalMakitasMade > (targetState.totalMakitasMade || 0)) {
+      targetState.totalMakitasMade = body.totalMakitasMade;
+    }
+    if (typeof body.makitas === 'number' && body.makitas > (targetState.makitas || 0)) {
+      targetState.makitas = body.makitas;
+    }
+
+    const shouldPersistTarget = targetUserId && (
+      clicks > 0 ||
+      (targetState.mps > 0 && (now - (targetState.lastSavedAt || 0) >= 10000))
+    );
+
+    if (shouldPersistTarget) {
+      if (clicks > 0) {
+        const gainPerClick = getSingleClickGain(targetState.perms, targetState.mps);
+        const totalGain = gainPerClick * clicks;
+        targetState.makitas = (targetState.makitas || 0) + totalGain;
+        targetState.totalMakitasMade = (targetState.totalMakitasMade || 0) + totalGain;
+      }
       targetState.lastSavedAt = now;
       await saveUserState(env, targetUserId, targetState, null, false);
 

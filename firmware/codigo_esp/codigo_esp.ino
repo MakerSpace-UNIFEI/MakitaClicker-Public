@@ -77,6 +77,7 @@ const char* password = "SUA_SENHA_WIFI";
 
 // ===== ESTADO DO JOGO =====
 double makitas = 0.0;
+double totalMakitasMade = 0.0;
 const int MAX_OWNED = 100;
 int pendingPhysicalClicks = 0;
 
@@ -463,7 +464,9 @@ void handleClicks(uint32_t count) {
     gainPerClick += (cachedMps * 0.05);
   }
 
-  makitas += (gainPerClick * (double)count);
+  double totalGain = (gainPerClick * (double)count);
+  makitas += totalGain;
+  totalMakitasMade += totalGain;
   pendingPhysicalClicks += count;
   isFlashDirty = true;
   ultimoClickVisual = millis();
@@ -506,6 +509,8 @@ void loadLocalGameState() {
   }
 
   if (doc.containsKey("makitas")) makitas = doc["makitas"].as<double>();
+  if (doc.containsKey("totalMakitasMade")) totalMakitasMade = doc["totalMakitasMade"].as<double>();
+  else totalMakitasMade = makitas;
   if (doc.containsKey("lastExecutedResetTimestamp")) {
     lastExecutedResetTimestamp = doc["lastExecutedResetTimestamp"].as<uint64_t>();
   }
@@ -543,7 +548,7 @@ void loadLocalGameState() {
   }
 
   recalculateStats();
-  Serial.printf("[FS] Save local carregado! Saldo: %.1f | MPS: %.1f\n", makitas, cachedMps);
+  Serial.printf("[FS] Save local carregado! Saldo: %.1f | Total: %.1f | MPS: %.1f\n", makitas, totalMakitasMade, cachedMps);
 }
 
 void saveLocalGameState() {
@@ -553,6 +558,7 @@ void saveLocalGameState() {
   DynamicJsonDocument doc(2048);
 #endif
   doc["makitas"] = makitas;
+  doc["totalMakitasMade"] = totalMakitasMade;
   doc["lastExecutedResetTimestamp"] = lastExecutedResetTimestamp;
 
   JsonObject ownedObj = doc["owned"].to<JsonObject>();
@@ -645,6 +651,7 @@ void syncWithCloud() {
   reqDoc["source"] = "esp";
   reqDoc["clicks"] = clicksToSend;
   reqDoc["makitas"] = makitas;
+  reqDoc["totalMakitasMade"] = totalMakitasMade;
   reqDoc["fwVersion"] = CURRENT_FIRMWARE_VER;
   reqDoc["ip"] = WiFi.localIP().toString();
   reqDoc["rssi"] = WiFi.RSSI();
@@ -773,6 +780,7 @@ void syncWithCloud() {
             atualizarLCD();
 
             makitas = 0.0;
+            totalMakitasMade = 0.0;
             pendingPhysicalClicks = 0;
             for (int i = 0; i < NUM_UPGRADES; i++) ownedUpgrades[i] = 0;
             permLubrificante = permDiscoDiamante = permMotorBrushless = permEmpunhadura = false;
@@ -810,11 +818,13 @@ void syncWithCloud() {
         const char* tName = topObj["name"] | "";
         if (strlen(tName) > 0) {
           topPlayerName = sanitizarString(tName);
-          topPlayerMakitas = topObj["makitas"] | 0.0;
+          topPlayerMakitas = topObj["totalMakitasMade"] | (topObj["makitas"] | 0.0);
         }
       }
 
       // 2. CONTROLE DE POSSE DO CONSOLE FÍSICO (HARDWARE OWNER COM PROTEÇÃO TEMPORAL CONTRA KV EVENTUAL):
+      bool prevOwnerActive = hardwareOwnerActive;
+      String prevOwnerName = hardwareOwnerName;
       bool isStaleOwnerPayload = false;
       if (doc["hardwareOwner"].is<JsonObject>()) {
         JsonObject hObj = doc["hardwareOwner"];
@@ -844,131 +854,80 @@ void syncWithCloud() {
           }
         }
       }
+      bool ownerStateChanged = (hardwareOwnerActive != prevOwnerActive) || (hardwareOwnerActive && hardwareOwnerName != prevOwnerName);
 
       // 3. ADOÇÃO OU RECONCILIAÇÃO DO USUÁRIO-ALVO (OWNER OU TOP PLAYER):
       if (!isStaleOwnerPayload) {
         const char* rawTarget = doc["targetUserId"] | "";
         String newTarget = String(rawTarget);
         bool targetChanged = (newTarget.length() > 0 && newTarget != currentTargetUserId);
-        if (targetChanged) {
+        if (targetChanged || ownerStateChanged) {
           currentTargetUserId = newTarget;
-          Serial.printf("[TARGET] Alvo do console alterado para: %s\n", newTarget.c_str());
-          if (doc.containsKey("makitas")) {
-            makitas = doc["makitas"].as<double>();
-          }
+          Serial.printf("[TARGET] Alvo do console alterado/reivindicado: %s (Dono: %s)\n",
+                        newTarget.c_str(), hardwareOwnerActive ? hardwareOwnerName.c_str() : "Livre");
+        }
+
+        // Sincroniza saldo e total produzido autoritativos da nuvem
+        if (doc.containsKey("makitas")) {
+          double serverMakitas = doc["makitas"].as<double>();
+          makitas = serverMakitas + (cachedClickPower * (double)pendingPhysicalClicks);
+        }
+        if (doc.containsKey("totalMakitasMade")) {
+          double serverTotal = doc["totalMakitasMade"].as<double>();
+          totalMakitasMade = serverTotal + (cachedClickPower * (double)pendingPhysicalClicks);
+        } else if (doc.containsKey("makitas")) {
+          if (makitas > totalMakitasMade) totalMakitasMade = makitas;
+        }
+
+        // Sincroniza oficinas (upgrades) diretamente do perfil ativo na nuvem
+        if (doc.containsKey("owned")) {
+          JsonObject ownedObj = doc["owned"].as<JsonObject>();
           for (int i = 0; i < NUM_UPGRADES; i++) {
-            ownedUpgrades[i] = 0;
-          }
-          if (doc.containsKey("owned")) {
-            JsonObject ownedObj = doc["owned"].as<JsonObject>();
-            for (int i = 0; i < NUM_UPGRADES; i++) {
-              if (ownedObj.containsKey(UPGRADE_CONFIGS[i].id)) {
-                ownedUpgrades[i] = ownedObj[UPGRADE_CONFIGS[i].id].as<int>();
-              }
+            if (ownedObj.containsKey(UPGRADE_CONFIGS[i].id)) {
+              ownedUpgrades[i] = ownedObj[UPGRADE_CONFIGS[i].id].as<int>();
+            } else {
+              ownedUpgrades[i] = 0;
             }
-          }
-          permLubrificante = false;
-          permDiscoDiamante = false;
-          permMotorBrushless = false;
-          permEmpunhadura = false;
-          permBateriaLitio = false;
-          permIaMaker = false;
-          permRefrigeracao = false;
-          permTitanio = false;
-          permOverclock = false;
-          permNanobots = false;
-          permSingularidade = false;
-          permPlasmaCutter = false;
-          permFusaoFria = false;
-          permHiperconducao = false;
-          permSinergiaQuantica = false;
-          permLaserGama = false;
-          permTaquions = false;
-          permMateriaEscura = false;
-          permHiperClique = false;
-          permOnipotenciaMaker = false;
-          if (doc.containsKey("perms")) {
-            JsonObject permsObj = doc["perms"].as<JsonObject>();
-            permLubrificante = permsObj["perm_lubrificante"] | false;
-            permDiscoDiamante = permsObj["perm_disco_diamante"] | false;
-            permMotorBrushless = permsObj["perm_motor_brushless"] | false;
-            permEmpunhadura = permsObj["perm_empunhadura"] | false;
-            permBateriaLitio = permsObj["perm_bateria_litio"] | false;
-            permIaMaker = permsObj["perm_ia_maker"] | false;
-            permRefrigeracao = permsObj["perm_refrigeracao"] | false;
-            permTitanio = permsObj["perm_titanio"] | false;
-            permOverclock = permsObj["perm_overclock"] | false;
-            permNanobots = permsObj["perm_nanobots"] | false;
-            permSingularidade = permsObj["perm_singularidade"] | false;
-            permPlasmaCutter = permsObj["perm_plasma_cutter"] | false;
-            permFusaoFria = permsObj["perm_fusao_fria"] | false;
-            permHiperconducao = permsObj["perm_hiperconducao"] | false;
-            permSinergiaQuantica = permsObj["perm_sinergia_quantica"] | false;
-            permLaserGama = permsObj["perm_laser_gama"] | false;
-            permTaquions = permsObj["perm_taquions"] | false;
-            permMateriaEscura = permsObj["perm_materia_escura"] | false;
-            permHiperClique = permsObj["perm_hiper_clique"] | false;
-            permOnipotenciaMaker = permsObj["perm_onipotencia_maker"] | false;
-          }
-          recalculateStats();
-          isFlashDirty = true;
-        } else {
-          // Saldo Monotônico dentro da mesma sessão de jogador
-          if (doc.containsKey("makitas")) {
-            double serverMakitas = doc["makitas"].as<double>();
-            if (serverMakitas > makitas) {
-              makitas = serverMakitas;
-              isFlashDirty = true;
-            }
-          }
-
-          // Upgrades: Mantém maior nível dentro da mesma sessão
-          bool statsChanged = false;
-          if (doc.containsKey("owned")) {
-            JsonObject ownedObj = doc["owned"].as<JsonObject>();
-            for (int i = 0; i < NUM_UPGRADES; i++) {
-              if (ownedObj.containsKey(UPGRADE_CONFIGS[i].id)) {
-                int serverVal = ownedObj[UPGRADE_CONFIGS[i].id].as<int>();
-                if (serverVal > ownedUpgrades[i]) {
-                  ownedUpgrades[i] = serverVal;
-                  statsChanged = true;
-                  isFlashDirty = true;
-                }
-              }
-            }
-          }
-
-          // Tecnologias Permanentes
-          if (doc.containsKey("perms")) {
-            JsonObject permsObj = doc["perms"].as<JsonObject>();
-            #define CHECK_PERM(var, key) if (!var && (permsObj[key] | false)) { var = true; statsChanged = true; isFlashDirty = true; }
-            CHECK_PERM(permLubrificante, "perm_lubrificante");
-            CHECK_PERM(permDiscoDiamante, "perm_disco_diamante");
-            CHECK_PERM(permMotorBrushless, "perm_motor_brushless");
-            CHECK_PERM(permEmpunhadura, "perm_empunhadura");
-            CHECK_PERM(permBateriaLitio, "perm_bateria_litio");
-            CHECK_PERM(permIaMaker, "perm_ia_maker");
-            CHECK_PERM(permRefrigeracao, "perm_refrigeracao");
-            CHECK_PERM(permTitanio, "perm_titanio");
-            CHECK_PERM(permOverclock, "perm_overclock");
-            CHECK_PERM(permNanobots, "perm_nanobots");
-            CHECK_PERM(permSingularidade, "perm_singularidade");
-            CHECK_PERM(permPlasmaCutter, "perm_plasma_cutter");
-            CHECK_PERM(permFusaoFria, "perm_fusao_fria");
-            CHECK_PERM(permHiperconducao, "perm_hiperconducao");
-            CHECK_PERM(permSinergiaQuantica, "perm_sinergia_quantica");
-            CHECK_PERM(permLaserGama, "perm_laser_gama");
-            CHECK_PERM(permTaquions, "perm_taquions");
-            CHECK_PERM(permMateriaEscura, "perm_materia_escura");
-            CHECK_PERM(permHiperClique, "perm_hiper_clique");
-            CHECK_PERM(permOnipotenciaMaker, "perm_onipotencia_maker");
-            #undef CHECK_PERM
-          }
-
-          if (statsChanged) {
-            recalculateStats();
           }
         }
+
+        // Sincroniza tecnologias permanentes
+        if (doc.containsKey("perms")) {
+          JsonObject permsObj = doc["perms"].as<JsonObject>();
+          permLubrificante = permsObj["perm_lubrificante"] | false;
+          permDiscoDiamante = permsObj["perm_disco_diamante"] | false;
+          permMotorBrushless = permsObj["perm_motor_brushless"] | false;
+          permEmpunhadura = permsObj["perm_empunhadura"] | false;
+          permBateriaLitio = permsObj["perm_bateria_litio"] | false;
+          permIaMaker = permsObj["perm_ia_maker"] | false;
+          permRefrigeracao = permsObj["perm_refrigeracao"] | false;
+          permTitanio = permsObj["perm_titanio"] | false;
+          permOverclock = permsObj["perm_overclock"] | false;
+          permNanobots = permsObj["perm_nanobots"] | false;
+          permSingularidade = permsObj["perm_singularidade"] | false;
+          permPlasmaCutter = permsObj["perm_plasma_cutter"] | false;
+          permFusaoFria = permsObj["perm_fusao_fria"] | false;
+          permHiperconducao = permsObj["perm_hiperconducao"] | false;
+          permSinergiaQuantica = permsObj["perm_sinergia_quantica"] | false;
+          permLaserGama = permsObj["perm_laser_gama"] | false;
+          permTaquions = permsObj["perm_taquions"] | false;
+          permMateriaEscura = permsObj["perm_materia_escura"] | false;
+          permHiperClique = permsObj["perm_hiper_clique"] | false;
+          permOnipotenciaMaker = permsObj["perm_onipotencia_maker"] | false;
+        }
+
+        // Recalcula stats locais por segurança
+        recalculateStats();
+
+        // Adota DIRETAMENTE o MPS e Poder de Clique calculados autoritativamente pelo servidor!
+        if (doc.containsKey("mps")) {
+          cachedMps = doc["mps"].as<double>();
+        }
+        if (doc.containsKey("clickPower")) {
+          cachedClickPower = doc["clickPower"].as<double>();
+        }
+
+        isFlashDirty = true;
       }
 
       statusAtual = "Ativo";
@@ -1336,7 +1295,9 @@ void loop() {
     float dt = (now - lastTick) / 1000.0;
     lastTick = now;
     if (cachedMps > 0) {
-      makitas += (cachedMps * dt);
+      double passiveGain = (cachedMps * dt);
+      makitas += passiveGain;
+      totalMakitasMade += passiveGain;
       precisaAtualizarLCD = true;
     }
   }

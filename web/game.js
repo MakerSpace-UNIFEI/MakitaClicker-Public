@@ -1884,6 +1884,11 @@ async function claimHardware(force = false) {
         return;
     }
 
+    // Salva o progresso e melhorias na nuvem antes de assumir o hardware para que a ESP receba imediatamente
+    try {
+        await saveGameStateCloud(true);
+    } catch (e) {}
+
     if (btnClaimHardwareEl) {
         btnClaimHardwareEl.disabled = true;
     }
@@ -1899,6 +1904,8 @@ async function claimHardware(force = false) {
                 action: 'claim_hardware',
                 userId: currentUserId,
                 userName: currentUserName || 'Maker',
+                createdAt: currentUserCreatedAt,
+                state: getCompactGameState(),
                 force
             })
         });
@@ -2050,12 +2057,14 @@ function updateSaveIndicator() {
 const rankingListContainerEl = document.getElementById('rankingListContainer');
 const btnRefreshRankingEl = document.getElementById('btnRefreshRanking');
 
-async function fetchRanking() {
+async function fetchRanking(silent = false) {
     if (!rankingListContainerEl) return;
-    rankingListContainerEl.innerHTML = '<div class="ranking-empty">Carregando ranking...</div>';
-    if (btnRefreshRankingEl) {
-        btnRefreshRankingEl.disabled = true;
-        btnRefreshRankingEl.textContent = '⏳ Carregando...';
+    if (!silent) {
+        rankingListContainerEl.innerHTML = '<div class="ranking-empty">Carregando ranking...</div>';
+        if (btnRefreshRankingEl) {
+            btnRefreshRankingEl.disabled = true;
+            btnRefreshRankingEl.textContent = '⏳ Carregando...';
+        }
     }
 
     try {
@@ -2068,10 +2077,12 @@ async function fetchRanking() {
 
         renderRanking(data.users || []);
     } catch (e) {
-        console.warn('Erro ao carregar ranking:', e);
-        rankingListContainerEl.innerHTML = '<div class="ranking-empty">Erro ao carregar o ranking. Tente novamente.</div>';
+        if (!silent) {
+            console.warn('Erro ao carregar ranking:', e);
+            rankingListContainerEl.innerHTML = '<div class="ranking-empty">Erro ao carregar o ranking. Tente novamente.</div>';
+        }
     } finally {
-        if (btnRefreshRankingEl) {
+        if (!silent && btnRefreshRankingEl) {
             btnRefreshRankingEl.disabled = false;
             btnRefreshRankingEl.textContent = '🔄 Atualizar';
         }
@@ -2085,13 +2096,25 @@ function renderRanking(users) {
         return;
     }
 
-    // Ordena por totalMakitasMade decrescente
-    users.sort((a, b) => (b.totalMakitasMade || b.makitas || 0) - (a.totalMakitasMade || a.makitas || 0));
+    const currentTotal = Math.max(Number(totalMakitasMade) || 0, Number(makitas) || 0);
+    const updatedUsers = users.map(u => {
+        if (u && u.id === currentUserId) {
+            return {
+                ...u,
+                makitas: Math.max(Number(u.makitas) || 0, Number(makitas) || 0),
+                totalMakitasMade: Math.max(Number(u.totalMakitasMade) || Number(u.makitas) || 0, currentTotal)
+            };
+        }
+        return u;
+    });
 
-    const topScore = users[0].totalMakitasMade || users[0].makitas || 0;
+    // Ordena por totalMakitasMade decrescente
+    updatedUsers.sort((a, b) => (b.totalMakitasMade || b.makitas || 0) - (a.totalMakitasMade || a.makitas || 0));
+
+    const topScore = updatedUsers[0].totalMakitasMade || updatedUsers[0].makitas || 0;
 
     rankingListContainerEl.innerHTML = '';
-    users.forEach((user, idx) => {
+    updatedUsers.forEach((user, idx) => {
         const score = user.totalMakitasMade || user.makitas || 0;
         const isMe = user.id === currentUserId;
         const pos = idx + 1;
@@ -2888,6 +2911,12 @@ function initGame() {
                             renderStats();
                         }
                     }
+                }
+
+                // Se a aba de ranking estiver aberta, atualiza o ranking em tempo real
+                const rankingTabEl = document.getElementById('tab-ranking');
+                if (rankingTabEl && rankingTabEl.classList.contains('is-active')) {
+                    fetchRanking(true);
                 }
             } catch (e) {}
         }
