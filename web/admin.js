@@ -3,9 +3,6 @@
 // Autenticação Criptográfica com Hash SHA-256 (Senha Segura One-Way)
 // =====================================================================
 
-// Hash SHA-256 da senha 'ADMIN_PASSWORD' (irreversível, impossível descriptografar)
-const ADMIN_EXPECTED_HASH = 'c9a2abd67ad59717195e5d8a6f917ba5084d81af244b0a8d40c8b30f234742d7';
-
 let currentAuthHash = sessionStorage.getItem('makita_admin_hash') || null;
 
 // Elementos do DOM
@@ -392,11 +389,6 @@ if (loginFormEl) {
         if (!rawPassword) return;
 
         const hashed = await hashPassword(rawPassword);
-        if (hashed !== ADMIN_EXPECTED_HASH) {
-            if (loginErrorEl) loginErrorEl.textContent = 'Senha incorreta. Acesso não permitido.';
-            return;
-        }
-
         await verifyAndLoad(hashed);
     });
 }

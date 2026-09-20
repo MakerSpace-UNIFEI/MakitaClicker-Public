@@ -72,8 +72,21 @@ const char* VERSION_URL = "https://makitaclicker.pages.dev/version.json";
 const char* STATE_URL   = "https://makitaclicker.pages.dev/api/state";
 const char* GAMESTATE_FILE = "/gamestate.json";
 
-const char* ssid = "MakerSpace UNIFEI";
-const char* password = "SUA_SENHA_WIFI";
+// Credenciais Wi-Fi (configuraveis via secrets.h ou variaveis de ambiente no build)
+#if __has_include("secrets.h")
+#include "secrets.h"
+#endif
+
+#ifndef WIFI_SSID
+#define WIFI_SSID "SEU_WIFI_SSID"
+#endif
+
+#ifndef WIFI_PASSWORD
+#define WIFI_PASSWORD "SUA_SENHA_WIFI"
+#endif
+
+const char* ssid = WIFI_SSID;
+const char* password = WIFI_PASSWORD;
 
 // ===== ESTADO DO JOGO =====
 double makitas = 0.0;

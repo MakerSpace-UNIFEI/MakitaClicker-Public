@@ -17,8 +17,16 @@ fi
 
 echo "=== Versão deste build: $VERSION ==="
 
-# 2. Patch temporário da versão do firmware no .ino ANTES de compilar
+# 2. Patch temporário da versão do firmware e credenciais Wi-Fi no .ino ANTES de compilar
 sed -i "s/#define CURRENT_FIRMWARE_VER .*/#define CURRENT_FIRMWARE_VER $VERSION/" firmware/codigo_esp/codigo_esp.ino
+if [ -n "$WIFI_SSID" ]; then
+  sed -i "s/#define WIFI_SSID .*/#define WIFI_SSID \"$WIFI_SSID\"/" firmware/codigo_esp/codigo_esp.ino
+  echo "[CONFIG] SSID configurado via variavel de ambiente WIFI_SSID"
+fi
+if [ -n "$WIFI_PASSWORD" ]; then
+  sed -i "s/#define WIFI_PASSWORD .*/#define WIFI_PASSWORD \"$WIFI_PASSWORD\"/" firmware/codigo_esp/codigo_esp.ino
+  echo "[CONFIG] Senha Wi-Fi configurada via variavel de ambiente WIFI_PASSWORD"
+fi
 
 echo "[VERSION] codigo_esp.ino patchado com CURRENT_FIRMWARE_VER = $VERSION"
 
@@ -88,7 +96,9 @@ cat ./dist/version.json
 
 cp ./dist/version.json ./web/public/version.json 2>/dev/null || true
 
-# 10. Limpeza: Restaura a constante CURRENT_FIRMWARE_VER no .ino para manter o arquivo base limpo
+# 10. Limpeza: Restaura constantes no .ino para manter o repositorio limpo
 sed -i "s/#define CURRENT_FIRMWARE_VER .*/#define CURRENT_FIRMWARE_VER 0/" firmware/codigo_esp/codigo_esp.ino
+sed -i "s/#define WIFI_SSID .*/#define WIFI_SSID \"SEU_WIFI_SSID\"/" firmware/codigo_esp/codigo_esp.ino
+sed -i "s/#define WIFI_PASSWORD .*/#define WIFI_PASSWORD \"SUA_SENHA_WIFI\"/" firmware/codigo_esp/codigo_esp.ino
 
 echo "=== Pipeline OTA concluido com sucesso ==="

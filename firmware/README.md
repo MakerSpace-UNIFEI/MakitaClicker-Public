@@ -176,4 +176,5 @@ Apenas o **primeiro flash** precisa ser feito via cabo USB. Depois disso, todos 
    - **LiquidCrystal I2C**
 5. Conecte a NodeMCU no computador via micro-USB.
 6. Selecione a placa **NodeMCU 1.0 (ESP-12E Module)** e a porta correspondente.
-7. Abra `codigo_esp/codigo_esp.ino`, verifique as credenciais do Wi-Fi (`ssid` e `password`) e clique em **Upload**.
+7. Configure as credenciais do seu Wi-Fi criando `codigo_esp/secrets.h` (baseado no modelo `codigo_esp/secrets.example.h`) ou via variáveis de ambiente `WIFI_SSID` e `WIFI_PASSWORD` no CI/CD.
+8. Abra `codigo_esp/codigo_esp.ino` e clique em **Upload**.

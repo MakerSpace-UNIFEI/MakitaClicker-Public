@@ -1,25 +1,36 @@
-# ── Build Outputs ──
+# ── Build Outputs & Dependencies ──
 dist/
 node_modules/
 build_esp/
 arduino-cli
+.vite/
 
-### IntelliJ IDEA ###
+# ── Environment & Secrets ──
+.env
+.env.*
+*.env
+secrets.h
+firmware/codigo_esp/secrets.h
+
+# ── IntelliJ IDEA ──
 .idea/
-.idea/modules.xml
-.idea/jarRepositories.xml
-.idea/compiler.xml
-.idea/libraries/
 *.iws
 *.iml
 *.ipr
 
-### VS Code ###
+# ── VS Code & Editors ──
 .vscode/
 .history/
+*.swp
+*.swo
 
-### KiCad ###
+# ── KiCad Temporary Files ──
 *.kicad_prl
+*-save.kicad_pcb
+*-save.kicad_sch
+*.kicad_pcb-bak
+*.kicad_sch-bak
 
-### Mac OS ###
+# ── Operating System ──
 .DS_Store
+Thumbs.db

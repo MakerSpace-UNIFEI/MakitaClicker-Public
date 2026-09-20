@@ -50,7 +50,7 @@ O projeto é um jogo incremental (Cookie Clicker) **híbrido** (Físico + Web).
   - Perfis de usuário não herdam nem sofrem `Math.max` com o saldo da ESP física (`gamestate`).
   - O salvamento de usuário só é aceito se o `resetEpoch` do payload for `>=` ao `resetEpoch` gravado no banco.
 - **Painel Administrativo (`/admin.html`):**
-  - Rota protegida por hash SHA-256 da senha `ADMIN_PASSWORD` (`c9a2abd67ad59717195e5d8a6f917ba5084d81af244b0a8d40c8b30f234742d7`).
+  - Rota protegida por hash SHA-256 da senha de administrador (configurável via variável de ambiente `ADMIN_AUTH_HASH`).
   - Permite verificar credenciais (`admin_verify`), deletar perfil individual (`admin_delete_user`), deletar todos os perfis (`admin_delete_all_users`) e forçar reset global de hardware (`admin_reset_hardware`).
 
 ### Firmware (C++ ESP8266)
@@ -80,13 +80,13 @@ O reset é bidirecional para evitar ressurreição de dados offline antigos.
 - **Frontend:** Rode `npm run dev`. O frontend vai detectar o modo local e cortar as requisições HTTPS para simular o jogo offline perfeitamente.
 - **ESP8266:** Só precisa compilar a primeira vez via USB. A placa auto-atualiza o `.bin` via rede a cada push na branch `main`.
 
-## 🌐 5. API de Leitura Pública (Read-All API)
-Como o repositório é privado, está disponível um token de leitura da Cloudflare para que serviços externos e IAs possam inspecionar os dados do banco D1/KV e telemetria:
+## 🌐 5. API de Leitura da Cloudflare (Read-All API)
+Para que serviços externos, dashboards ou assistentes de IA possam inspecionar os dados do banco D1/KV e telemetria:
 
-- **API Token (Read-Only):** Definido via variável `$CF_READ_TOKEN` (chave `cfat_*` de leitura)
-- **Account ID:** `<CLOUDFLARE_ACCOUNT_ID>`
-- **D1 Database ID (`makitaclicker-db`):** `<SEU_D1_DATABASE_ID>`
-- **KV Namespace ID (`makita-kv`):** `<SEU_KV_NAMESPACE_ID>`
+- **API Token (Read-Only):** Definido via variável `$CF_READ_TOKEN` (chave `cfat_*` de leitura gerada no painel Cloudflare)
+- **Account ID:** Definido via variável `$CF_ACCOUNT_ID`
+- **D1 Database ID:** Definido via variável `$CF_D1_DATABASE_ID`
+- **KV Namespace ID:** Definido via variável `$CF_KV_NAMESPACE`
 - **Documentação Completa:** Consulte [`API_READ_GUIDE.md`](./API_READ_GUIDE.md) para exemplos práticos de chamadas `curl`, Node.js e Python para consultar o D1 SQL, o cache KV e os endpoints REST da aplicação.
 
 

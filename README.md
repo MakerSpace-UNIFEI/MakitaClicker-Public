@@ -162,10 +162,10 @@ Para evitar que o progresso seja restaurado acidentalmente no site por nós CDN 
 O painel administrativo permite gerenciar a base de dados de jogadores e o hardware sem expor endpoints desprotegidos.
 
 - **URL de Acesso:** [https://makitaclicker.pages.dev/admin.html](https://makitaclicker.pages.dev/admin.html)
-- **Senha de Administrador:** `ADMIN_PASSWORD`
+- **Autenticação:** Protegida por hash SHA-256 (configurável via variável de ambiente `ADMIN_AUTH_HASH` na Cloudflare).
 
 > [!NOTE]
-> A senha existe para proteger a integridade do jogo e evitar que jogadores apaguem acidentalmente o progresso uns dos outros. No código JavaScript, a senha é validada através de seu hash criptográfico SHA-256 (`c9a2abd67ad59717195e5d8a6f917ba5084d81af244b0a8d40c8b30f234742d7`) gerado localmente pelo navegador (`crypto.subtle.digest`), evitando o envio de senhas em texto puro.
+> O painel administrativo existe para proteger a integridade do jogo e evitar que jogadores apaguem acidentalmente o progresso uns dos outros. No código JavaScript, a autenticação é validada através do hash criptográfico SHA-256 gerado localmente pelo navegador (`crypto.subtle.digest`) e conferido pelo backend, sem trafegar senhas em texto puro.
 
 ### Funcionalidades do Painel:
 - **Gerenciamento de Perfis:** Exibe tabela completa de perfis salvos no Cloudflare D1 e KV com ID, apelido (desduplicado), data de cadastro e progresso de Makitas.
@@ -204,12 +204,14 @@ flowchart TD
 ## 🛠️ Como Editar e Personalizar
 
 ### 1. Alterar Credenciais do Wi-Fi
-Abra [`firmware/codigo_esp/codigo_esp.ino`](firmware/codigo_esp/codigo_esp.ino) e modifique as linhas:
+Para compilação local no Arduino IDE ou CLI, crie o arquivo `firmware/codigo_esp/secrets.h` baseado em [`firmware/codigo_esp/secrets.example.h`](firmware/codigo_esp/secrets.example.h):
 ```cpp
-const char* ssid     = "NOME_DA_SUA_REDE";
-const char* password = "SENHA_DO_SEU_WIFI";
+#define WIFI_SSID     "NOME_DA_SUA_REDE"
+#define WIFI_PASSWORD "SENHA_DO_SEU_WIFI"
 ```
-Faça o commit e push. Na próxima conexão, ou gravando manualmente via USB, a ESP conectará na nova rede.
+*(O arquivo `secrets.h` já está no `.gitignore` e não será versionado).*
+
+Em pipelines de CI/CD (Cloudflare Pages), defina as variáveis de ambiente `WIFI_SSID` e `WIFI_PASSWORD` no painel do Cloudflare Pages. O script [`build-firmware.sh`](build-firmware.sh) injeta as variáveis automaticamente no momento da compilação e mantém o repositório seguro.
 
 ### 2. Configurar Oficinas (Loja) e Árvore de Habilidades
 As oficinas e tecnologias agora são centralizadas no arquivo [`game-config.json`](game-config.json) na raiz do repositório:
@@ -245,4 +247,4 @@ O Vite iniciará um servidor em `localhost`. O motor gráfico detectará o ambie
 ## 📜 Licença e Créditos
 
 Desenvolvido com dedicação pelos membros do **MakerSpace UNIFEI**.  
-Disponível para fins educacionais, acadêmicos e projetos de cultura maker.
+Distribuído sob a licença **MIT**. Consulte o arquivo [`LICENSE`](LICENSE) para mais detalhes.

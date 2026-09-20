@@ -144,7 +144,7 @@ A API roda em Workers da Cloudflare no modelo Edge Computing (baixa latência mu
 - `action: "release_hardware"`: Libera voluntariamente a máquina física.
 - `action: "sync"`: Utilizado pela ESP8266 para enviar telemetria e cliques e receber estado mestre enxuto (< 700 bytes).
 - `action: "reset"`: Dispara handshake de limpeza global do hardware.
-- `action: "admin_verify"`: Valida o hash SHA-256 da senha administrativa (`ADMIN_PASSWORD`).
+- `action: "admin_verify"`: Valida o hash SHA-256 da credencial administrativa.
 - `action: "admin_delete_user"`: Remove um perfil específico do D1 e KV.
 - `action: "admin_delete_all_users"`: Remove todos os perfis cadastrados no sistema.
 
@@ -154,7 +154,7 @@ A API roda em Workers da Cloudflare no modelo Edge Computing (baixa latência mu
 
 Interface dedicada para gestão de perfis e manutenção do servidor:
 - **URL:** [https://makitaclicker.pages.dev/admin.html](https://makitaclicker.pages.dev/admin.html)
-- **Senha:** `ADMIN_PASSWORD` (validada via hash SHA-256 no cliente e no servidor para segurança de ponta a ponta).
+- **Autenticação:** Protegida por hash SHA-256 (configurável via variável de ambiente `ADMIN_AUTH_HASH` na Cloudflare).
 - **Funcionalidades:**
   - Listagem completa de jogadores cadastrados com ID, apelido desduplicado, data de cadastro e saldo atual.
   - Exclusão individual de perfis do Cloudflare D1 e KV com recálculo imediato da liderança.

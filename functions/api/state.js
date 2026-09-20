@@ -8,9 +8,12 @@ import gameConfig from './game-config.json';
 
 const KV_KEY = 'gamestate';
 const USERS_LIST_KEY = 'users:list';
-const MAX_OWNED = gameConfig.meta?.maxOwnedPerUpgrade || 100;
-// Hash SHA-256 criptográfico de 'ADMIN_PASSWORD' para autenticação segura e irreversível no painel administrativo
-const ADMIN_AUTH_HASH = 'c9a2abd67ad59717195e5d8a6f917ba5084d81af244b0a8d40c8b30f234742d7';
+// Hash SHA-256 criptográfico para autenticação no painel administrativo (configurável via env.ADMIN_AUTH_HASH)
+const DEFAULT_ADMIN_AUTH_HASH = 'c9a2abd67ad59717195e5d8a6f917ba5084d81af244b0a8d40c8b30f234742d7';
+
+function getAdminAuthHash(env) {
+  return String(env?.ADMIN_AUTH_HASH || DEFAULT_ADMIN_AUTH_HASH).trim().toLowerCase();
+}
 
 // Configuração das oficinas e tecnologias derivadas de game-config.json
 const UPGRADES = gameConfig.upgrades;
@@ -1770,7 +1773,7 @@ export async function onRequestPost(context) {
   // -------------------------------------------------------------
   if (action === 'admin_verify') {
     const authHash = String(body.authHash || '').trim().toLowerCase();
-    if (authHash !== ADMIN_AUTH_HASH) {
+    if (authHash !== getAdminAuthHash(env)) {
       return new Response(JSON.stringify({ success: false, error: 'Senha administrativa incorreta.' }), {
         status: 401,
         headers: CORS_HEADERS
@@ -1797,7 +1800,7 @@ export async function onRequestPost(context) {
 
   if (action === 'admin_delete_user') {
     const authHash = String(body.authHash || '').trim().toLowerCase();
-    if (authHash !== ADMIN_AUTH_HASH) {
+    if (authHash !== getAdminAuthHash(env)) {
       return new Response(JSON.stringify({ success: false, error: 'Não autorizado.' }), {
         status: 401,
         headers: CORS_HEADERS
@@ -1839,7 +1842,7 @@ export async function onRequestPost(context) {
 
   if (action === 'admin_delete_all_users') {
     const authHash = String(body.authHash || '').trim().toLowerCase();
-    if (authHash !== ADMIN_AUTH_HASH) {
+    if (authHash !== getAdminAuthHash(env)) {
       return new Response(JSON.stringify({ success: false, error: 'Não autorizado.' }), {
         status: 401,
         headers: CORS_HEADERS
@@ -1871,7 +1874,7 @@ export async function onRequestPost(context) {
   // AÇÃO ADMINISTRATIVA: EMITIR ORDEM NA FILA DA ESP (Factory Reset / Reset Simples)
   if (action === 'admin_reset_hardware') {
     const authHash = String(body.authHash || '').trim().toLowerCase();
-    if (authHash !== ADMIN_AUTH_HASH) {
+    if (authHash !== getAdminAuthHash(env)) {
       return new Response(JSON.stringify({ success: false, error: 'Não autorizado.' }), {
         status: 401,
         headers: CORS_HEADERS
@@ -1936,7 +1939,7 @@ export async function onRequestPost(context) {
   // AÇÃO ADMINISTRATIVA: CANCELAR ORDEM PENDENTE NA FILA
   if (action === 'admin_cancel_order') {
     const authHash = String(body.authHash || '').trim().toLowerCase();
-    if (authHash !== ADMIN_AUTH_HASH) {
+    if (authHash !== getAdminAuthHash(env)) {
       return new Response(JSON.stringify({ success: false, error: 'Não autorizado.' }), {
         status: 401,
         headers: CORS_HEADERS
