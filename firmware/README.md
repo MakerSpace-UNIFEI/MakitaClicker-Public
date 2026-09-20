@@ -9,7 +9,9 @@ O firmware é 100% autônomo e opera com arquitetura de alta performance:
 - Persistência em memória flash protegida por **Wear-Leveling Shield** via **LittleFS** (gravação condicional).
 - Reconexão Wi-Fi contínua e não-bloqueante a cada **10 segundos** com indicação visual dinâmica.
 - Sincronização HTTPS com Cloudflare Pages Functions (Dual-Engine D1 + KV) com buffers BearSSL calibrados (`2560/768` bytes, timeout `2500ms`) e proteção contra *Stack Overflow* (zero recursão no reset).
-- Auto-atualização de firmware **OTA (Over-The-Air)** com **checksum criptográfico MD5**, suporte a records de 16 KB e barra de progresso em tempo real no LCD.
+> [!NOTE]
+> **Status do Hardware (Legado / Histórico):**  
+> Este firmware foi desenvolvido durante o tempo livre no **MakerSpace UNIFEI** como prova de conceito para um console físico integrado a jogos incrementais. O protótipo físico foi posteriormente **desmontado e seus componentes reaproveitados** em outros projetos do laboratório. Estes arquivos foram mantidos no repositório como referência arquitetural de IoT, interrupções em microcontroladores e CI/CD com OTA.
 
 ---
 
