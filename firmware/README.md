@@ -10,8 +10,8 @@ O firmware é 100% autônomo e opera com arquitetura de alta performance:
 - Reconexão Wi-Fi contínua e não-bloqueante a cada **10 segundos** com indicação visual dinâmica.
 - Sincronização HTTPS com Cloudflare Pages Functions (Dual-Engine D1 + KV) com buffers BearSSL calibrados (`2560/768` bytes, timeout `2500ms`) e proteção contra *Stack Overflow* (zero recursão no reset).
 > [!NOTE]
-> **Status do Hardware (Legado / Histórico):**  
-> Este firmware foi desenvolvido durante o tempo livre no **MakerSpace UNIFEI** como prova de conceito para um console físico integrado a jogos incrementais. O protótipo físico foi posteriormente **desmontado e seus componentes reaproveitados** em outros projetos do laboratório. Estes arquivos foram mantidos no repositório como referência arquitetural de IoT, interrupções em microcontroladores e CI/CD com OTA.
+> **Snapshot Funcional "As-Is":**  
+> Este código C++ representa fielmente o firmware que rodou na placa ESP8266 física enquanto o console esteve ativo no **MakerSpace UNIFEI**. Todas as rotinas de interrupção ISR (0 ms), comunicação I2C a 400 kHz no LCD, persistência flash LittleFS e handshake BearSSL estão preservadas no estado operacional original. As únicas alterações em relação ao código de bancada foram a sanitização das credenciais privadas de Wi-Fi para placeholders seguros via `secrets.example.h`. Embora os componentes físicos tenham sido reaproveitados em novos projetos após o experimento, o código aqui permanece como um blueprint completo, compilável e funcional.
 
 ---
 

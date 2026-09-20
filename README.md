@@ -9,21 +9,23 @@
 ---
 
 > [!NOTE]
-> **Status do Hardware Físico:**  
-> O console físico integrado (ESP8266 + LCD 20×4 I2C + botão industrial mecânico) foi um projeto desenvolvido no **tempo livre** dos autores no laboratório **MakerSpace UNIFEI**. O hardware físico foi posteriormente **desmontado e seus componentes reutilizados** em novos experimentos e projetos do espaço.  
-> O código-fonte do firmware em C++, o esquemático e a PCB no KiCad foram preservados neste repositório para fins educacionais e como registro histórico de engenharia de sistemas embarcados integrados à web. O jogo continua **100% jogável e ativo** em sua versão Web!
+> **Snapshot Histórico Funcional ("As-Is"):**  
+> Este repositório público preserva o código em sua versão **"as-is"**, representando fielmente o sistema na época em que o console físico estava **ativo e em pleno funcionamento** no laboratório **MakerSpace UNIFEI**.  
+> Todas as funcionalidades de integração entre hardware e nuvem — como leitura instantânea do botão mecânico via interrupção (0 ms), sincronização bidirecional de telemetria, posse temporária do hardware via Web com exibição em tempo real no display LCD 20×4 e auto-update OTA — estão preservadas no código exatamente como operavam.  
+> **Segurança Open-Source:** As únicas alterações feitas em relação ao código que rodou em produção foram a sanitização de segredos privados (credenciais de Wi-Fi, senhas administrativas e identificadores de infraestrutura), que foram substituídos por placeholders seguros e suporte a variáveis de ambiente.  
+> O console físico foi fruto de um projeto de tempo livre dos autores; após o ciclo de demonstração, o hardware físico foi desmontado e seus componentes reaproveitados em outros projetos do MakerSpace.
 
 ---
 
 ## 📖 Visão Geral do Projeto
 
-O **MakitaClicker** é um jogo incremental (*cookie clicker*) com temática Maker/Industrial. O objetivo do jogo é acumular "Makitas" até atingir a grande meta cósmica de **99 Bilhões (99B)**. 
+O **MakitaClicker** é um jogo incremental (*cookie clicker*) híbrido físico-digital desenvolvido para o MakerSpace UNIFEI. O objetivo do jogo é acumular "Makitas" até atingir a grande meta cósmica de **99 Bilhões (99B)**. 
 
-O projeto foi concebido com uma integração pioneira entre hardware embarcado e web:
-1. **Console Físico Autônomo (Legado / Histórico):** Criado originalmente com um microcontrolador **ESP8266 NodeMCU**, botão mecânico industrial de 0ms de latência e display **LCD 20×4 I2C**. Sincronizava pela internet via Wi-Fi, salvava na memória flash interna (**LittleFS**) e exibia em tempo real o jogador com maior pontuação ou o dono temporário da máquina com suporte a posse exclusiva via Web. *(Hardware atualmente desativado e componentes reaproveitados)*.
+Este repositório documenta a integração completa entre hardware e web em seu estado funcional:
+1. **Console Físico Autônomo:** Um microcontrolador **ESP8266 NodeMCU** com botão mecânico industrial de alta durabilidade (0 ms de latência) e um display **LCD 20×4 I2C**. Salva o progresso na memória flash interna (**LittleFS**), sincroniza pela internet via Wi-Fi e exibe em tempo real o **Top Player** ou o **Dono Temporário** no display com suporte a posse exclusiva via Web.
 2. **Interface Web Moderna & Sistema de Perfis:** Roda em qualquer navegador (desktop ou mobile) na taxa de atualização nativa do monitor com cálculo via `dt`, perfis de usuário individuais instantâneos (sem senha), desduplicação automática de apelidos (`Nome`, `Nome 2`...), upload e recuperação transparente de perfis locais, auto-save frequente a cada 15 segundos no D1, debounced saves em compras (2-3s) e cliques, botão manual de salvamento na nuvem, loja de oficinas, árvore tecnológica (*Skill Tree*) e telemetria de hardware.
 3. **Backend Serverless D1-Primary (Cloudflare D1 SQL + KV Backup):** Banco de dados relacional SQL no Cloudflare D1 como camada primária autoritativa (`100.000 gravações/dia` e `5.000.000 leituras/dia` gratuitas nas tabelas `users`, `user_states`, `global_state`, `hardware_lease`, `ip_bans`) com Cloudflare KV atuando como backup secundário com throttling de 60s para respeitar rigorosamente a cota gratuita do KV (1.000 writes/dia).
-4. **CI/CD e Firmware OTA Automático:** A cada `git push` no repositório GitHub, a Cloudflare compila a aplicação web e também compila o código C++ do ESP8266 via `arduino-cli`. A ESP baixava a nova versão de firmware pelo ar (Over-The-Air) automaticamente, sem necessidade de cabos.
+4. **CI/CD e Firmware OTA Automático:** A cada `git push` no repositório GitHub, a Cloudflare compila a aplicação web e também compila o código C++ do ESP8266 via `arduino-cli`. A ESP baixa a nova versão de firmware pelo ar (Over-The-Air) automaticamente, sem necessidade de cabos.
 
 ---
 
@@ -121,9 +123,9 @@ O frontend foi desenvolvido com foco em alta performance, responsividade e desac
 
 ---
 
-## 🔌 Como Funcionava o Firmware (`firmware/codigo_esp/`) [Histórico]
+## 🔌 Como Funciona o Firmware (`firmware/codigo_esp/`)
 
-A placa **ESP8266 NodeMCU** operava de forma 100% autônoma, sem necessidade de qualquer microcontrolador secundário:
+A placa **ESP8266 NodeMCU** é 100% autônoma e opera sem necessidade de qualquer microcontrolador secundário:
 
 1. **Clock a 160 MHz:** A CPU roda em frequência máxima (`system_update_cpu_freq(160)`) para processar requisições HTTPS com TLS moderno e desenhar o LCD sem atrasos.
 2. **Botão Físico com Interrupção de Hardware (0 ms de Latência):** Monitorado via interrupção externa no pino **D5** (`attachInterrupt` em `FALLING` com `INPUT_PULLUP` e `ICACHE_RAM_ATTR`). Possui filtro de debounce de 25 ms em microssegundos e drenagem atômica no `loop()`. **Zero cliques perdidos**, mesmo durante requisições de rede HTTPS ou handshakes TLS.
